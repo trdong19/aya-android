@@ -1,0 +1,682 @@
+package io.liriliri.aya.adb
+
+import android.content.Context
+import android.util.Log
+import io.liriliri.aya.data.ConnectionState
+import io.liriliri.aya.data.Device
+import io.liriliri.aya.data.DeviceOverview
+import io.liriliri.aya.data.PackageInfo
+import io.liriliri.aya.data.DeviceFile
+import io.liriliri.aya.data.ProcessInfo
+import io.liriliri.aya.data.PerformanceSnapshot
+import io.liriliri.aya.data.LogcatEntry
+import io.liriliri.aya.data.WebviewInfo
+import io.liriliri.aya.data.PortForward
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Main manager for ADB device connections and operations.
+ */
+class DeviceManager(private val context: Context) {
+    companion object {
+        private const val TAG = "DeviceManager"
+    }
+
+    private val crypto by lazy { AdbCrypto.loadOrCreate(context) }
+    private val connections = ConcurrentHashMap<String, AdbConnection>()
+    private val activeStreams = ConcurrentHashMap<String, AdbStream>()
+
+    private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
+    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
+
+    private val _connectedDevices = MutableStateFlow<List<Device>>(emptyList())
+    val connectedDevices: StateFlow<List<Device>> = _connectedDevices.asConnectedDevices()
+
+    private fun MutableStateFlow<List<Device>>.asConnectedDevices() = asStateFlow()
+
+    /**
+     * Connect to a device via WiFi ADB.
+     */
+    suspend fun connect(host: String, port: Int = 5555): Device {
+        val deviceId = "$host:$port"
+        _connectionState.value = ConnectionState.Connecting
+
+        try {
+            val connection = AdbConnection(host, port, crypto)
+            connection.connect()
+
+            connections[deviceId] = connection
+
+            // Get device properties
+            val props = getDeviceProperties(connection)
+            val device = Device(
+                id = deviceId,
+                host = host,
+                port = port,
+                name = props["ro.product.model"] ?: "",
+                model = props["ro.product.model"] ?: "",
+                androidVersion = props["ro.build.version.release"] ?: "",
+                apiLevel = (props["ro.build.version.sdk"] ?: "0").toIntOrNull() ?: 0,
+                isConnected = true,
+                lastConnected = System.currentTimeMillis()
+            )
+
+            _connectionState.value = ConnectionState.Connected(device)
+            _connectedDevices.value = _connectedDevices.value + device
+
+            return device
+        } catch (e: Exception) {
+            _connectionState.value = ConnectionState.Error(e.message ?: "Unknown error")
+            throw e
+        }
+    }
+
+    /**
+     * Disconnect from a device.
+     */
+    fun disconnect(deviceId: String) {
+        connections[deviceId]?.disconnect()
+        connections.remove(deviceId)
+        _connectedDevices.value = _connectedDevices.value.filter { it.id != deviceId }
+        if (_connectedDevices.value.isEmpty()) {
+            _connectionState.value = ConnectionState.Disconnected
+        }
+    }
+
+    /**
+     * Disconnect all devices.
+     */
+    fun disconnectAll() {
+        connections.values.forEach { it.disconnect() }
+        connections.clear()
+        _connectedDevices.value = emptyList()
+        _connectionState.value = ConnectionState.Disconnected
+    }
+
+    /**
+     * Get the ADB connection for a device.
+     */
+    fun getConnection(deviceId: String): AdbConnection {
+        return connections[deviceId] ?: throw IllegalStateException("Device not connected: $deviceId")
+    }
+
+    // ==================== Device Info ====================
+
+    suspend fun getOverview(deviceId: String): DeviceOverview {
+        val conn = getConnection(deviceId)
+        val commands = listOf(
+            "getprop ro.product.model",
+            "getprop ro.product.brand",
+            "getprop ro.product.device",
+            "getprop ro.serialno",
+            "getprop ro.build.version.release",
+            "getprop ro.build.version.sdk",
+            "uname -r",
+            "getprop ro.hardware",
+            "cat /proc/cpuinfo | grep processor | wc -l",
+            "getprop ro.product.cpu.abi",
+            "cat /proc/meminfo | grep MemTotal",
+            "wm size",
+            "wm density",
+            "ip addr show wlan0 2>/dev/null | grep 'inet ' | awk '{print \$2}' | cut -d/ -f1",
+            "dumpsys battery"
+        )
+        val results = conn.shell(commands)
+
+        return DeviceOverview(
+            model = results.getOrElse(0) { "" },
+            brand = results.getOrElse(1) { "" },
+            name = results.getOrElse(0) { "" },
+            serial = results.getOrElse(3) { "" },
+            androidVersion = results.getOrElse(4) { "" },
+            apiLevel = results.getOrElse(5) { "0" }.toIntOrNull() ?: 0,
+            kernelVersion = results.getOrElse(6) { "" },
+            processor = results.getOrElse(7) { "" },
+            cores = results.getOrElse(8) { "0" }.trim().toIntOrNull() ?: 0,
+            abi = results.getOrElse(9) { "" },
+            memoryTotal = parseMemoryTotal(results.getOrElse(10) { "" }),
+            resolution = results.getOrElse(11) { "" }.trim(),
+            density = results.getOrElse(12) { "0" }.trim().toIntOrNull() ?: 0,
+            ip = results.getOrElse(13) { "" }.trim(),
+            batteryLevel = parseBatteryLevel(results.getOrElse(14) { "" }),
+            batteryTemperature = parseBatteryTemperature(results.getOrElse(14) { "" }),
+            isRooted = checkRoot(conn)
+        )
+    }
+
+    // ==================== Package Management ====================
+
+    suspend fun getPackages(deviceId: String, includeSystem: Boolean = false): List<String> {
+        val conn = getConnection(deviceId)
+        val cmd = if (includeSystem) "pm list packages" else "pm list packages -3"
+        val result = conn.shell(cmd)
+        return result.lines()
+            .filter { it.startsWith("package:") }
+            .map { it.removePrefix("package:").trim() }
+            .sorted()
+    }
+
+    suspend fun getPackageInfos(deviceId: String, packageNames: List<String>): List<PackageInfo> {
+        val conn = getConnection(deviceId)
+        val infos = mutableListOf<PackageInfo>()
+
+        for (pkg in packageNames) {
+            try {
+                val info = getPackageInfo(conn, pkg)
+                infos.add(info)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to get info for $pkg: ${e.message}")
+                infos.add(PackageInfo(packageName = pkg))
+            }
+        }
+        return infos
+    }
+
+    private suspend fun getPackageInfo(conn: AdbConnection, pkg: String): PackageInfo {
+        val result = conn.shell("dumpsys package $pkg")
+        val lines = result.lines()
+
+        return PackageInfo(
+            packageName = pkg,
+            versionName = extractField(lines, "versionName"),
+            versionCode = extractField(lines, "versionCode=").split("/").firstOrNull()
+                ?.toLongOrNull() ?: 0,
+            minSdkVersion = extractField(lines, "minSdk").toIntOrNull() ?: 0,
+            targetSdkVersion = extractField(lines, "targetSdk").toIntOrNull() ?: 0,
+            firstInstallTime = extractField(lines, "firstInstallTime").toLongOrNull() ?: 0,
+            lastUpdateTime = extractField(lines, "lastUpdateTime").toLongOrNull() ?: 0,
+            apkPath = extractField(lines, "codePath"),
+            isSystem = result.contains("pkgFlags=") && result.contains("SYSTEM"),
+            isEnabled = !result.contains("enabled=false")
+        )
+    }
+
+    suspend fun installPackage(deviceId: String, apkPath: String): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("pm install -r '$apkPath'")
+    }
+
+    suspend fun uninstallPackage(deviceId: String, packageName: String): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("pm uninstall $packageName")
+    }
+
+    suspend fun startPackage(deviceId: String, packageName: String): String {
+        val conn = getConnection(deviceId)
+        // Get the main activity
+        val dumpResult = conn.shell("dumpsys package $packageName | grep -A 1 MAIN")
+        val activityLine = dumpResult.lines().find { it.contains("$packageName/") }
+        val component = activityLine?.trim()?.split(" ")?.find { it.contains("$packageName/") }
+            ?: return conn.shell("monkey -p $packageName -c android.intent.category.LAUNCHER 1")
+        return conn.shell("am start -n $component")
+    }
+
+    suspend fun stopPackage(deviceId: String, packageName: String): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("am force-stop $packageName")
+    }
+
+    suspend fun clearPackage(deviceId: String, packageName: String): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("pm clear $packageName")
+    }
+
+    suspend fun disablePackage(deviceId: String, packageName: String): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("pm disable-user $packageName")
+    }
+
+    suspend fun enablePackage(deviceId: String, packageName: String): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("pm enable $packageName")
+    }
+
+    suspend fun getTopPackage(deviceId: String): Pair<String, Int> {
+        val conn = getConnection(deviceId)
+        val result = conn.shell("dumpsys activity activities | grep mResumedActivity")
+        val regex = Regex("""u0\s+([\w.]+)/([\w.$]+)""")
+        val match = regex.find(result)
+        return if (match != null) {
+            Pair(match.groupValues[1], 0)
+        } else {
+            Pair("", 0)
+        }
+    }
+
+    // ==================== File Management ====================
+
+    suspend fun readDir(deviceId: String, path: String): List<DeviceFile> {
+        val conn = getConnection(deviceId)
+        val result = conn.shell("ls -la '$path' 2>/dev/null || ls '$path' 2>/dev/null")
+        return result.lines()
+            .filter { it.isNotBlank() && !it.startsWith("total") }
+            .mapNotNull { parseLsLine(it, path) }
+    }
+
+    suspend fun deleteFile(deviceId: String, path: String): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("rm -rf '$path'")
+    }
+
+    suspend fun createDir(deviceId: String, path: String): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("mkdir -p '$path'")
+    }
+
+    suspend fun moveFile(deviceId: String, src: String, dest: String): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("mv '$src' '$dest'")
+    }
+
+    suspend fun pullFile(deviceId: String, remotePath: String, localPath: String) {
+        // Use a file server approach or cat + base64 encoding
+        val conn = getConnection(deviceId)
+        // For small files, use base64
+        // For large files, use a temporary HTTP server
+        // For now, use base64 approach
+        val result = conn.shell("base64 '$remotePath'")
+        val bytes = android.util.Base64.decode(result, android.util.Base64.DEFAULT)
+        java.io.File(localPath).writeBytes(bytes)
+    }
+
+    suspend fun pushFile(deviceId: String, localPath: String, remotePath: String) {
+        val conn = getConnection(deviceId)
+        val bytes = java.io.File(localPath).readBytes()
+        val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        conn.shell("echo '$base64' | base64 -d > '$remotePath'")
+    }
+
+    // ==================== Process Management ====================
+
+    suspend fun getProcesses(deviceId: String): List<ProcessInfo> {
+        val conn = getConnection(deviceId)
+        val result = conn.shell("ps -A -o PID,USER,%CPU,TIME,RSS,NAME")
+        return result.lines()
+            .drop(1) // header
+            .filter { it.isNotBlank() }
+            .mapNotNull { parseProcessLine(it) }
+    }
+
+    // ==================== Performance ====================
+
+    suspend fun getPerformance(deviceId: String): PerformanceSnapshot {
+        val conn = getConnection(deviceId)
+        val results = conn.shell(listOf(
+            "cat /proc/stat",
+            "cat /proc/meminfo",
+            "dumpsys battery"
+        ))
+
+        val cpuStat = results.getOrElse(0) { "" }
+        val memInfo = results.getOrElse(1) { "" }
+        val battery = results.getOrElse(2) { "" }
+
+        return PerformanceSnapshot(
+            cpuLoads = parseCpuLoads(cpuStat),
+            memoryUsed = parseMemoryUsed(memInfo),
+            memoryTotal = parseMemoryTotal(memInfo),
+            batteryLevel = parseBatteryLevel(battery),
+            batteryVoltage = parseBatteryVoltage(battery),
+            batteryTemperature = parseBatteryTemperature(battery)
+        )
+    }
+
+    suspend fun getCpuTemperature(deviceId: String): Float {
+        val conn = getConnection(deviceId)
+        val result = conn.shell("dumpsys thermalservice")
+        return parseCpuTemperature(result)
+    }
+
+    suspend fun getFps(deviceId: String, packageName: String): Float {
+        val conn = getConnection(deviceId)
+        val result = conn.shell("dumpsys SurfaceFlinger --list")
+        val layers = result.lines().filter { it.contains(packageName) }
+        if (layers.isEmpty()) return 0f
+
+        val layer = layers.first()
+        val latencyResult = conn.shell("dumpsys SurfaceFlinger --latency '$layer'")
+        return parseFps(latencyResult)
+    }
+
+    suspend fun getUptime(deviceId: String): Long {
+        val conn = getConnection(deviceId)
+        val result = conn.shell("cat /proc/uptime")
+        return result.split("\\s+".toRegex()).firstOrNull()?.toFloatOrNull()?.toLong() ?: 0
+    }
+
+    // ==================== Logcat ====================
+
+    suspend fun openLogcat(deviceId: String, onEntry: suspend (LogcatEntry) -> Unit): String {
+        val conn = getConnection(deviceId)
+        val stream = conn.open("shell:logcat -v threadtime")
+        val streamId = "logcat_${System.currentTimeMillis()}"
+
+        activeStreams[streamId] = stream
+
+        // Read logcat entries in a coroutine
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val buffer = StringBuilder()
+                stream.output.collect { data ->
+                    if (data.isEmpty()) return@collect
+                    buffer.append(String(data))
+                    // Process complete lines
+                    while (true) {
+                        val newlineIdx = buffer.indexOf('\n')
+                        if (newlineIdx < 0) break
+                        val line = buffer.substring(0, newlineIdx).trim()
+                        buffer.delete(0, newlineIdx + 1)
+                        if (line.isNotBlank()) {
+                            val entry = parseLogcatLine(line)
+                            if (entry != null) {
+                                onEntry(entry)
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Logcat error: ${e.message}")
+            }
+        }
+
+        return streamId
+    }
+
+    suspend fun closeLogcat(streamId: String) {
+        activeStreams.remove(streamId)?.close()
+    }
+
+    suspend fun pauseLogcat(streamId: String) {
+        // Send SIGSTOP to logcat or close and reopen
+        // For simplicity, we just stop collecting
+    }
+
+    suspend fun resumeLogcat(streamId: String) {
+        // Resume collection
+    }
+
+    // ==================== Screenshot ====================
+
+    suspend fun screencap(deviceId: String): ByteArray {
+        val conn = getConnection(deviceId)
+        val result = conn.shell("screencap -p | base64")
+        return android.util.Base64.decode(result.trim(), android.util.Base64.DEFAULT)
+    }
+
+    // ==================== Layout ====================
+
+    suspend fun dumpWindowHierarchy(deviceId: String): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("uiautomator dump /dev/tty 2>/dev/null || uiautomator dump /sdcard/window_dump.xml && cat /sdcard/window_dump.xml")
+    }
+
+    // ==================== Webview ====================
+
+    suspend fun getWebviews(deviceId: String, pid: Int): List<WebviewInfo> {
+        val conn = getConnection(deviceId)
+        val unixResult = conn.shell("cat /proc/net/unix")
+        val sockets = unixResult.lines()
+            .filter { it.contains("webview_devtools_remote_$pid") }
+            .mapNotNull { line ->
+                line.split("\\s+".toRegex()).lastOrNull()?.trimStart('@')
+            }
+
+        if (sockets.isEmpty()) return emptyList()
+
+        val socketName = sockets.first()
+        val localPort = forwardTcp(deviceId, "localabstract:$socketName")
+
+        // Query Chrome DevTools Protocol
+        return try {
+            val url = "http://127.0.0.1:$localPort/json"
+            val result = withContext(Dispatchers.IO) {
+                java.net.URL(url).readText()
+            }
+            parseWebviewList(result)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    // ==================== Port Forwarding ====================
+
+    suspend fun forwardTcp(deviceId: String, remote: String): Int {
+        val conn = getConnection(deviceId)
+        // List existing forwards to reuse
+        val existing = conn.shell("host-serial:${deviceId.split(":").firstOrNull() ?: ""}:list-forward")
+        // Parse and find existing or create new
+        val localPort = (10000..60000).random()
+        conn.shell("tcp:$localPort $remote")
+        return localPort
+    }
+
+    suspend fun listForwards(deviceId: String): List<PortForward> {
+        val conn = getConnection(deviceId)
+        val result = conn.shell("host:list-forward")
+        return result.lines()
+            .filter { it.isNotBlank() }
+            .mapNotNull { parseForwardLine(it) }
+    }
+
+    // ==================== Input ====================
+
+    suspend fun inputKey(deviceId: String, keyCode: Int): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("input keyevent $keyCode")
+    }
+
+    suspend fun inputText(deviceId: String, text: String): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("input text '${text.replace("'", "\\'")}'")
+    }
+
+    suspend fun inputTap(deviceId: String, x: Int, y: Int): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("input tap $x $y")
+    }
+
+    suspend fun inputSwipe(deviceId: String, x1: Int, y1: Int, x2: Int, y2: Int, duration: Int = 300): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("input swipe $x1 $y1 $x2 $y2 $duration")
+    }
+
+    // ==================== Settings ====================
+
+    suspend fun getFontScale(deviceId: String): Float {
+        val conn = getConnection(deviceId)
+        val result = conn.shell("settings get system font_scale")
+        return result.toFloatOrNull() ?: 1.0f
+    }
+
+    suspend fun setFontScale(deviceId: String, scale: Float): String {
+        val conn = getConnection(deviceId)
+        return conn.shell("settings put system font_scale $scale")
+    }
+
+    // ==================== Helper Methods ====================
+
+    private suspend fun getDeviceProperties(conn: AdbConnection): Map<String, String> {
+        val result = conn.shell("getprop")
+        val props = mutableMapOf<String, String>()
+        result.lines().forEach { line ->
+            val match = Regex("""\[([^\]]+)\]:\s*\[([^\]]*)\]""").find(line)
+            if (match != null) {
+                props[match.groupValues[1]] = match.groupValues[2]
+            }
+        }
+        return props
+    }
+
+    private suspend fun checkRoot(conn: AdbConnection): Boolean {
+        return try {
+            val result = conn.shell("id")
+            result.contains("uid=0")
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun parseMemoryTotal(info: String): Long {
+        val match = Regex("""MemTotal:\s+(\d+)\s+kB""").find(info)
+        return match?.groupValues?.get(1)?.toLongOrNull()?.times(1024) ?: 0
+    }
+
+    private fun parseMemoryUsed(info: String): Long {
+        val total = parseMemoryTotal(info)
+        val available = Regex("""MemAvailable:\s+(\d+)\s+kB""").find(info)
+            ?.groupValues?.get(1)?.toLongOrNull()?.times(1024) ?: 0
+        return total - available
+    }
+
+    private fun parseBatteryLevel(battery: String): Int {
+        val match = Regex("""level:\s*(\d+)""").find(battery)
+        return match?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    }
+
+    private fun parseBatteryVoltage(battery: String): Float {
+        val match = Regex("""voltage:\s*(\d+)""").find(battery)
+        return (match?.groupValues?.get(1)?.toFloatOrNull() ?: 0f) / 1000f
+    }
+
+    private fun parseBatteryTemperature(battery: String): Float {
+        val match = Regex("""temperature:\s*(\d+)""").find(battery)
+        return (match?.groupValues?.get(1)?.toFloatOrNull() ?: 0f) / 10f
+    }
+
+    private fun parseCpuLoads(stat: String): List<Float> {
+        val loads = mutableListOf<Float>()
+        stat.lines().forEach { line ->
+            if (line.startsWith("cpu") && !line.startsWith("cpu ")) {
+                val parts = line.split("\\s+".toRegex()).drop(1)
+                if (parts.size >= 4) {
+                    val user = parts[0].toLongOrNull() ?: 0
+                    val nice = parts[1].toLongOrNull() ?: 0
+                    val sys = parts[2].toLongOrNull() ?: 0
+                    val idle = parts[3].toLongOrNull() ?: 0
+                    val iowait = parts.getOrElse(4) { "0" }.toLongOrNull() ?: 0
+                    val total = user + nice + sys + idle + iowait
+                    val used = total - idle - iowait
+                    if (total > 0) {
+                        loads.add(used * 100f / total)
+                    }
+                }
+            }
+        }
+        return loads
+    }
+
+    private fun parseCpuTemperature(thermalservice: String): Float {
+        val temps = Regex("""Temperature\{mValue=([0-9.]+),\s*mType=\d+,\s*mName=CPU""")
+            .findAll(thermalservice)
+            .mapNotNull { it.groupValues[1].toFloatOrNull() }
+            .toList()
+        return if (temps.isNotEmpty()) temps.average().toFloat() else 0f
+    }
+
+    private fun parseFps(latency: String): Float {
+        val lines = latency.lines().filter { it.isNotBlank() }
+        if (lines.size < 3) return 0f
+
+        val timestamps = lines.drop(2) // skip header lines
+            .mapNotNull { line ->
+                val parts = line.split("\\s+".toRegex())
+                parts.getOrNull(0)?.toLongOrNull()
+            }
+            .filter { it > 0 }
+
+        if (timestamps.size < 2) return 0f
+
+        val duration = (timestamps.last() - timestamps.first()) / 1_000_000_000.0
+        return if (duration > 0) ((timestamps.size - 1) / duration).toFloat() else 0f
+    }
+
+    private fun parseLsLine(line: String, parentPath: String): DeviceFile? {
+        val parts = line.split("\\s+".toRegex(), limit = 9)
+        if (parts.size < 9) return null
+
+        val perms = parts[0]
+        val size = parts[4].toLongOrNull() ?: 0
+        val name = parts[8]
+        if (name == "." || name == "..") return null
+
+        return DeviceFile(
+            name = name,
+            path = if (parentPath.endsWith("/")) "$parentPath$name" else "$parentPath/$name",
+            isDirectory = perms.startsWith("d"),
+            size = size,
+            permissions = perms
+        )
+    }
+
+    private fun parseProcessLine(line: String): ProcessInfo? {
+        val parts = line.split("\\s+".toRegex())
+        if (parts.size < 6) return null
+
+        return ProcessInfo(
+            pid = parts[0].toIntOrNull() ?: return null,
+            user = parts[1],
+            cpuPercent = parts[2].toFloatOrNull() ?: 0f,
+            cpuTime = parts[3],
+            memoryKb = (parts[4].toLongOrNull() ?: 0) * 1024, // RSS is in pages (4KB typically)
+            name = parts.drop(5).joinToString(" ")
+        )
+    }
+
+    private fun parseLogcatLine(line: String): LogcatEntry? {
+        // Format: MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG: MESSAGE
+        val regex = Regex("""(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+(.+?):\s*(.*)""")
+        val match = regex.find(line) ?: return null
+
+        return LogcatEntry(
+            timestamp = System.currentTimeMillis(),
+            pid = match.groupValues[2].toIntOrNull() ?: 0,
+            tid = match.groupValues[3].toIntOrNull() ?: 0,
+            priority = match.groupValues[4].firstOrNull() ?: 'I',
+            tag = match.groupValues[5].trim(),
+            message = match.groupValues[6]
+        )
+    }
+
+    private fun parseWebviewList(json: String): List<WebviewInfo> {
+        // Simple JSON array parsing
+        val items = mutableListOf<WebviewInfo>()
+        val regex = Regex("""\{[^}]+\}""")
+        regex.findAll(json).forEach { match ->
+            val obj = match.value
+            val title = extractJsonValue(obj, "title")
+            val url = extractJsonValue(obj, "url")
+            val wsUrl = extractJsonValue(obj, "webSocketDebuggerUrl")
+            val favicon = extractJsonValue(obj, "faviconUrl")
+            if (url.isNotBlank()) {
+                items.add(WebviewInfo(title, url, wsUrl, favicon))
+            }
+        }
+        return items
+    }
+
+    private fun extractJsonValue(json: String, key: String): String {
+        val regex = Regex(""""$key"\s*:\s*"([^"]*)"""")
+        return regex.find(json)?.groupValues?.get(1) ?: ""
+    }
+
+    private fun extractField(lines: List<String>, field: String): String {
+        for (line in lines) {
+            if (line.contains(field)) {
+                val regex = Regex("""$field\s*[=:]\s*(.+?)\s*$""")
+                val match = regex.find(line)
+                if (match != null) {
+                    return match.groupValues[1].trim().trim('"', '\'')
+                }
+            }
+        }
+        return ""
+    }
+
+    private fun parseForwardLine(line: String): PortForward? {
+        val parts = line.split("\\s+".toRegex())
+        if (parts.size < 3) return null
+        return PortForward(local = parts[1], remote = parts[2])
+    }
+}

@@ -1,0 +1,2 @@
+-keep class io.liriliri.aya.adb.** { *; }
+-keep class io.liriliri.aya.data.** { *; }
