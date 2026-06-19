@@ -12,6 +12,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import io.liriliri.aya.adb.DeviceManager
+import io.liriliri.aya.adb.LocalDeviceManager
 import io.liriliri.aya.data.DeviceOverview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -36,9 +37,11 @@ enum class MainTab(val label: String, val icon: ImageVector) {
 
 @HiltViewModel
 class MainAppViewModel @Inject constructor(
-    val deviceManager: DeviceManager
+    val deviceManager: DeviceManager,
+    private val localDeviceManager: LocalDeviceManager
 ) : ViewModel() {
     var currentTab = mutableStateOf(MainTab.Overview)
+    var isLocalDevice = mutableStateOf(false)
 
     private val _overview = MutableStateFlow<DeviceOverview?>(null)
     val overview: StateFlow<DeviceOverview?> = _overview.asStateFlow()
@@ -47,10 +50,15 @@ class MainAppViewModel @Inject constructor(
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
     fun loadOverview(deviceId: String) {
+        isLocalDevice.value = deviceId == "local"
         viewModelScope.launch {
             _isLoading.value = true
             try {
-                _overview.value = deviceManager.getOverview(deviceId)
+                _overview.value = if (deviceId == "local") {
+                    localDeviceManager.getOverview()
+                } else {
+                    deviceManager.getOverview(deviceId)
+                }
             } catch (e: Exception) {
                 // Handle error
             } finally {

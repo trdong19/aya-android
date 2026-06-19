@@ -29,6 +29,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import io.liriliri.aya.adb.DeviceManager
+import io.liriliri.aya.adb.LocalDeviceManager
 import io.liriliri.aya.data.ConnectionState
 import io.liriliri.aya.data.Device
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,7 +40,8 @@ import javax.inject.Inject
 
 @HiltViewModel
 class DeviceConnectViewModel @Inject constructor(
-    private val deviceManager: DeviceManager
+    private val deviceManager: DeviceManager,
+    private val localDeviceManager: LocalDeviceManager
 ) : ViewModel() {
 
     val connectionState = deviceManager.connectionState
@@ -53,6 +55,8 @@ class DeviceConnectViewModel @Inject constructor(
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
+
+    val hasLocalAccess: Boolean get() = localDeviceManager.isAvailable
 
     fun updateHost(value: String) { _host.value = value }
     fun updatePort(value: String) { _port.value = value }
@@ -75,6 +79,19 @@ class DeviceConnectViewModel @Inject constructor(
                 _error.value = e.message ?: "连接失败"
             }
         }
+    }
+
+    fun connectLocal(onSuccess: () -> Unit) {
+        if (!localDeviceManager.isAvailable) {
+            _error.value = "需要 Shizuku 或 Root 权限"
+            return
+        }
+        if (localDeviceManager.hasShizuku && !localDeviceManager.checkShizukuPermission()) {
+            localDeviceManager.requestShizukuPermission()
+            _error.value = "请授予 Shizuku 权限后重试"
+            return
+        }
+        onSuccess()
     }
 
     fun disconnect(deviceId: String) {
@@ -264,7 +281,34 @@ fun DeviceConnectScreen(
                 } else {
                     Icon(Icons.Default.Link, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("连接", fontSize = 16.sp)
+                    Text("连接远程设备", fontSize = 16.sp)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Local device button
+            OutlinedButton(
+                onClick = {
+                    focusManager.clearFocus()
+                    viewModel.connectLocal { onDeviceConnected("local") }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Icon(Icons.Default.PhoneAndroid, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("控制本机", fontSize = 16.sp)
+                if (viewModel.hasLocalAccess) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
             }
 
@@ -299,7 +343,7 @@ fun DeviceConnectScreen(
                     }
                 }
             } else {
-                // Tips
+                // Tips - Method 1: USB ADB
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(
@@ -308,15 +352,45 @@ fun DeviceConnectScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            "使用说明",
+                            "方法一：USB 转 WiFi ADB（推荐）",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(modifier = Modifier.height(8.dp))
-                        TipItem("1. 在目标设备上开启「开发者选项」")
-                        TipItem("2. 开启「USB 调试」和「无线调试」")
-                        TipItem("3. 输入设备的 IP 地址和端口")
-                        TipItem("4. 点击「连接」按钮")
+                        TipItem("1. 用 USB 线连接目标设备到电脑")
+                        TipItem("2. 电脑执行: adb tcpip 5555")
+                        TipItem("3. 拔掉 USB 线")
+                        TipItem("4. 输入设备 IP 地址，端口填 5555")
+                        TipItem("5. 点击「连接远程设备」")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Tips - Method 2: Wireless debugging
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "方法二：无线调试（Android 11+）",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TipItem("1. 开启「开发者选项」→「无线调试」")
+                        TipItem("2. 先用电脑配对: adb pair <IP>:<配对端口> <配对码>")
+                        TipItem("3. 配对成功后，输入无线调试显示的 IP 和端口")
+                        TipItem("4. 点击「连接远程设备」")
+                        Text(
+                            "⚠️ 无线调试每次重启需重新配对",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
                     }
                 }
             }
