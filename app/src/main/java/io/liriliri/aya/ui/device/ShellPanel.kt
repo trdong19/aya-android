@@ -110,7 +110,9 @@ class ShellViewModel @Inject constructor(
     }
 
     override fun onCleared() {
-        shellStream?.close()
+        viewModelScope.launch {
+            shellStream?.close()
+        }
     }
 }
 
