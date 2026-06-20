@@ -201,8 +201,18 @@ class DeviceManager(
         val result = conn.shell("dumpsys package $pkg")
         val lines = result.lines()
 
+        // Try to get the app label via pm dump (Android 12+)
+        val label = try {
+            val pmResult = conn.shell("pm dump $pkg 2>/dev/null | grep 'label=' | head -1")
+            val match = Regex("""label=(.+)""").find(pmResult)
+            match?.groupValues?.get(1)?.trim()?.ifBlank { pkg } ?: pkg
+        } catch (_: Exception) {
+            pkg
+        }
+
         return PackageInfo(
             packageName = pkg,
+            label = label,
             versionName = extractField(lines, "versionName"),
             versionCode = extractField(lines, "versionCode=").split("/").firstOrNull()
                 ?.toLongOrNull() ?: 0,
