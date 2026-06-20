@@ -244,6 +244,7 @@ class LocalDeviceManager(private val context: Context) {
     // ==================== Screenshot ====================
 
     suspend fun screencap(): ByteArray {
+        // Use base64 encoding through elevated executor (Shizuku/Root needed for screencap)
         val result = executor.execute("screencap -p | base64")
         return android.util.Base64.decode(result.trim(), android.util.Base64.DEFAULT)
     }
