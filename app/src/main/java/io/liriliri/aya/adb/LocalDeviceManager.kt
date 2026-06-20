@@ -43,7 +43,8 @@ class LocalDeviceManager(private val context: Context) {
 
             // Append our key to adb_keys
             // Use printf to avoid shell escaping issues with long base64 strings
-            val cmd = """printf '%s AYA\n' '$publicKeyBase64' >> /data/misc/adb/adb_keys && chmod 640 /data/misc/adb/adb_keys && chown system:shell /data/misc/adb/adb_keys"""
+            // Create the file if it doesn't exist, with correct ownership and permissions
+            val cmd = """touch /data/misc/adb/adb_keys && chown system:shell /data/misc/adb/adb_keys && chmod 640 /data/misc/adb/adb_keys && printf '%s AYA\n' '$publicKeyBase64' >> /data/misc/adb/adb_keys"""
             executor.execute(cmd)
             Log.d(TAG, "ADB key injected into adb_keys successfully")
             true
