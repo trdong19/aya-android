@@ -34,23 +34,47 @@ class LocalDeviceManager(private val context: Context) {
         }
 
         return try {
-            // Check if key already exists
-            val existing = executor.execute("cat /data/misc/adb/adb_keys 2>/dev/null")
+            // Check if key already exists in correct format
+            val existing = try {
+                executor.execute("cat /data/misc/adb/adb_keys 2>/dev/null")
+            } catch (_: Exception) { "" }
+
             if (existing.contains(publicKeyBase64)) {
-                Log.d(TAG, "ADB key already in adb_keys")
+                Log.d(TAG, "ADB key already in adb_keys, skipping injection")
                 return true
             }
 
+            Log.d(TAG, "Injecting ADB public key (${publicKeyBase64.length} base64 chars)")
+
             // Append our key to adb_keys
-            // Use printf to avoid shell escaping issues with long base64 strings
-            // Create the file if it doesn't exist, with correct ownership and permissions
-            val cmd = """touch /data/misc/adb/adb_keys && chown system:shell /data/misc/adb/adb_keys && chmod 640 /data/misc/adb/adb_keys && printf '%s AYA\n' '$publicKeyBase64' >> /data/misc/adb/adb_keys"""
+            // Format: base64(android_pubkey_blob_528bytes) AYA
+            // The blob is the 528-byte RSAPublicKey struct (without identity suffix)
+            val cmd = """printf '%s AYA\n' '$publicKeyBase64' >> /data/misc/adb/adb_keys && chown system:shell /data/misc/adb/adb_keys && chmod 640 /data/misc/adb/adb_keys"""
             executor.execute(cmd)
-            Log.d(TAG, "ADB key injected into adb_keys successfully")
+            Log.d(TAG, "ADB key written to adb_keys")
+
+            // Restart adbd so it re-reads adb_keys (adbd only loads keys at startup)
+            restartAdbd()
+
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to inject ADB key: ${e.message}")
             false
+        }
+    }
+
+    /**
+     * Restart adbd to force it to re-read /data/misc/adb/adb_keys.
+     */
+    private suspend fun restartAdbd() {
+        try {
+            Log.d(TAG, "Restarting adbd to reload keys...")
+            executor.execute("stop adbd && start adbd")
+            // Give adbd time to fully restart
+            kotlinx.coroutines.delay(2000)
+            Log.d(TAG, "adbd restarted")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to restart adbd: ${e.message}")
         }
     }
 
