@@ -30,6 +30,9 @@ class DeviceManager(
     private val crypto by lazy { AdbCrypto.loadOrCreate(context) }
     private val connections = ConcurrentHashMap<String, AdbConnection>()
     private val activeStreams = ConcurrentHashMap<String, AdbStream>()
+    private val localDeviceManager by lazy { LocalDeviceManager(context) }
+
+    private fun isLocal(deviceId: String) = deviceId == "local"
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -122,6 +125,7 @@ class DeviceManager(
     // ==================== Device Info ====================
 
     suspend fun getOverview(deviceId: String): DeviceOverview {
+        if (isLocal(deviceId)) return localDeviceManager.getOverview()
         val conn = getConnection(deviceId)
         val commands = listOf(
             "getprop ro.product.model",
@@ -166,6 +170,7 @@ class DeviceManager(
     // ==================== Package Management ====================
 
     suspend fun getPackages(deviceId: String, includeSystem: Boolean = false): List<String> {
+        if (isLocal(deviceId)) return localDeviceManager.getPackages(includeSystem)
         val conn = getConnection(deviceId)
         val cmd = if (includeSystem) "pm list packages" else "pm list packages -3"
         val result = conn.shell(cmd)
@@ -176,6 +181,7 @@ class DeviceManager(
     }
 
     suspend fun getPackageInfos(deviceId: String, packageNames: List<String>): List<PackageInfo> {
+        if (isLocal(deviceId)) return localDeviceManager.getPackageInfos(packageNames)
         val conn = getConnection(deviceId)
         val infos = mutableListOf<PackageInfo>()
 
@@ -211,16 +217,19 @@ class DeviceManager(
     }
 
     suspend fun installPackage(deviceId: String, apkPath: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.installPackage(apkPath)
         val conn = getConnection(deviceId)
         return conn.shell("pm install -r '$apkPath'")
     }
 
     suspend fun uninstallPackage(deviceId: String, packageName: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.uninstallPackage(packageName)
         val conn = getConnection(deviceId)
         return conn.shell("pm uninstall $packageName")
     }
 
     suspend fun startPackage(deviceId: String, packageName: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.startPackage(packageName)
         val conn = getConnection(deviceId)
         // Get the main activity
         val dumpResult = conn.shell("dumpsys package $packageName | grep -A 1 MAIN")
@@ -231,26 +240,31 @@ class DeviceManager(
     }
 
     suspend fun stopPackage(deviceId: String, packageName: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.stopPackage(packageName)
         val conn = getConnection(deviceId)
         return conn.shell("am force-stop $packageName")
     }
 
     suspend fun clearPackage(deviceId: String, packageName: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.clearPackage(packageName)
         val conn = getConnection(deviceId)
         return conn.shell("pm clear $packageName")
     }
 
     suspend fun disablePackage(deviceId: String, packageName: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.disablePackage(packageName)
         val conn = getConnection(deviceId)
         return conn.shell("pm disable-user $packageName")
     }
 
     suspend fun enablePackage(deviceId: String, packageName: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.enablePackage(packageName)
         val conn = getConnection(deviceId)
         return conn.shell("pm enable $packageName")
     }
 
     suspend fun getTopPackage(deviceId: String): Pair<String, Int> {
+        if (isLocal(deviceId)) return Pair(localDeviceManager.getTopPackage(), 0)
         val conn = getConnection(deviceId)
         val result = conn.shell("dumpsys activity activities | grep mResumedActivity")
         val regex = Regex("""u0\s+([\w.]+)/([\w.$]+)""")
@@ -265,6 +279,7 @@ class DeviceManager(
     // ==================== File Management ====================
 
     suspend fun readDir(deviceId: String, path: String): List<DeviceFile> {
+        if (isLocal(deviceId)) return localDeviceManager.readDir(path)
         val conn = getConnection(deviceId)
         val result = conn.shell("ls -la '$path' 2>/dev/null || ls '$path' 2>/dev/null")
         return result.lines()
@@ -273,16 +288,19 @@ class DeviceManager(
     }
 
     suspend fun deleteFile(deviceId: String, path: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.deleteFile(path)
         val conn = getConnection(deviceId)
         return conn.shell("rm -rf '$path'")
     }
 
     suspend fun createDir(deviceId: String, path: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.createDir(path)
         val conn = getConnection(deviceId)
         return conn.shell("mkdir -p '$path'")
     }
 
     suspend fun moveFile(deviceId: String, src: String, dest: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.moveFile(src, dest)
         val conn = getConnection(deviceId)
         return conn.shell("mv '$src' '$dest'")
     }
@@ -308,6 +326,7 @@ class DeviceManager(
     // ==================== Process Management ====================
 
     suspend fun getProcesses(deviceId: String): List<ProcessInfo> {
+        if (isLocal(deviceId)) return localDeviceManager.getProcesses()
         val conn = getConnection(deviceId)
         val result = conn.shell("ps -A -o PID,USER,%CPU,TIME,RSS,NAME")
         return result.lines()
@@ -319,6 +338,7 @@ class DeviceManager(
     // ==================== Performance ====================
 
     suspend fun getPerformance(deviceId: String): PerformanceSnapshot {
+        if (isLocal(deviceId)) return localDeviceManager.getPerformance()
         val conn = getConnection(deviceId)
         val results = conn.shell(listOf(
             "cat /proc/stat",
@@ -417,6 +437,7 @@ class DeviceManager(
     // ==================== Screenshot ====================
 
     suspend fun screencap(deviceId: String): ByteArray {
+        if (isLocal(deviceId)) return localDeviceManager.screencap()
         val conn = getConnection(deviceId)
         val result = conn.shell("screencap -p | base64")
         return android.util.Base64.decode(result.trim(), android.util.Base64.DEFAULT)
@@ -425,6 +446,7 @@ class DeviceManager(
     // ==================== Layout ====================
 
     suspend fun dumpWindowHierarchy(deviceId: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.dumpWindowHierarchy()
         val conn = getConnection(deviceId)
         return conn.shell("uiautomator dump /dev/tty 2>/dev/null || uiautomator dump /sdcard/window_dump.xml && cat /sdcard/window_dump.xml")
     }
@@ -480,21 +502,25 @@ class DeviceManager(
     // ==================== Input ====================
 
     suspend fun inputKey(deviceId: String, keyCode: Int): String {
+        if (isLocal(deviceId)) return localDeviceManager.inputKey(keyCode)
         val conn = getConnection(deviceId)
         return conn.shell("input keyevent $keyCode")
     }
 
     suspend fun inputText(deviceId: String, text: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.inputText(text)
         val conn = getConnection(deviceId)
         return conn.shell("input text '${text.replace("'", "\\'")}'")
     }
 
     suspend fun inputTap(deviceId: String, x: Int, y: Int): String {
+        if (isLocal(deviceId)) return localDeviceManager.inputTap(x, y)
         val conn = getConnection(deviceId)
         return conn.shell("input tap $x $y")
     }
 
     suspend fun inputSwipe(deviceId: String, x1: Int, y1: Int, x2: Int, y2: Int, duration: Int = 300): String {
+        if (isLocal(deviceId)) return localDeviceManager.inputTap(x1, y1)
         val conn = getConnection(deviceId)
         return conn.shell("input swipe $x1 $y1 $x2 $y2 $duration")
     }
