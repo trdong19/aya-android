@@ -22,6 +22,37 @@ class LocalDeviceManager(private val context: Context) {
     fun checkShizukuPermission() = executor.checkShizukuPermission()
     fun requestShizukuPermission() = executor.requestShizukuPermission()
 
+    /**
+     * Inject our ADB public key into /data/misc/adb/adb_keys via Shizuku/Root.
+     * This allows the ADB daemon to recognize our AUTH SIGNATURE.
+     * Required on Android 11+ where AUTH RSA_PUBLIC registration is not supported.
+     */
+    suspend fun injectAdbKey(publicKeyBase64: String): Boolean {
+        if (!isAvailable) {
+            Log.w(TAG, "Cannot inject ADB key: no Shizuku or Root")
+            return false
+        }
+
+        return try {
+            // Check if key already exists
+            val existing = executor.execute("cat /data/misc/adb/adb_keys 2>/dev/null")
+            if (existing.contains(publicKeyBase64)) {
+                Log.d(TAG, "ADB key already in adb_keys")
+                return true
+            }
+
+            // Append our key to adb_keys
+            // Use printf to avoid shell escaping issues with long base64 strings
+            val cmd = """printf '%s AYA\n' '$publicKeyBase64' >> /data/misc/adb/adb_keys && chmod 640 /data/misc/adb/adb_keys && chown system:shell /data/misc/adb/adb_keys"""
+            executor.execute(cmd)
+            Log.d(TAG, "ADB key injected into adb_keys successfully")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to inject ADB key: ${e.message}")
+            false
+        }
+    }
+
     // ==================== Device Info ====================
 
     suspend fun getOverview(): DeviceOverview {

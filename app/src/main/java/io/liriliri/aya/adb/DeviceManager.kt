@@ -19,7 +19,10 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Main manager for ADB device connections and operations.
  */
-class DeviceManager(private val context: Context) {
+class DeviceManager(
+    private val context: Context,
+    private val localCommandExecutor: LocalCommandExecutor? = null
+) {
     companion object {
         private const val TAG = "DeviceManager"
     }
@@ -44,6 +47,20 @@ class DeviceManager(private val context: Context) {
         _connectionState.value = ConnectionState.Connecting
 
         try {
+            // Try to inject our ADB key via Shizuku/Root before connecting.
+            // On Android 11+, AUTH RSA_PUBLIC registration is not supported,
+            // so the key must be pre-registered in /data/misc/adb/adb_keys.
+            try {
+                val localMgr = LocalDeviceManager(context)
+                if (localMgr.isAvailable) {
+                    val keyB64 = crypto.getPublicKeyBase64()
+                    Log.d(TAG, "Injecting ADB key before connect...")
+                    localMgr.injectAdbKey(keyB64)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Key injection failed (non-fatal): ${e.message}")
+            }
+
             val connection = AdbConnection(host, port, crypto)
             connection.connect()
 
