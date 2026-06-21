@@ -168,6 +168,19 @@ class ApplicationViewModel @Inject constructor(
                     } ?: throw Exception("无法读取文件")
                 }
 
+                // Check connection - try to reconnect if needed
+                try {
+                    deviceManager.getConnection(deviceId)
+                } catch (_: Exception) {
+                    // Try to reconnect
+                    val parts = deviceId.split(":")
+                    if (parts.size == 2) {
+                        deviceManager.connect(parts[0], parts[1].toIntOrNull() ?: 5555)
+                    } else {
+                        throw Exception("设备未连接，请重新连接")
+                    }
+                }
+
                 // Push and install on remote device
                 val result = deviceManager.pushAndInstall(deviceId, tmpFile.absolutePath)
                 tmpFile.delete()
