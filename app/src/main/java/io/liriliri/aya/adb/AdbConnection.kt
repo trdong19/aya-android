@@ -302,6 +302,8 @@ class AdbConnection(
                     streams[ourLocalId] = stream
                     pendingOpen.remove(ourLocalId)
                     stream.onReady()
+                    // MUST complete the deferred that open() is awaiting!
+                    pending.complete(stream)
                     Log.d(TAG, "Stream opened (OKAY): localId=$ourLocalId, remoteId=$remoteId")
                     _events.emit(AdbEvent.StreamOpened(stream))
                 } else {
