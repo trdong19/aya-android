@@ -14,6 +14,7 @@ import io.liriliri.aya.data.WebviewInfo
 import io.liriliri.aya.data.PortForward
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -135,6 +136,24 @@ class DeviceManager(
     }
 
     /**
+     * Get the ADB connection for a device. Auto-reconnects if the connection is dead.
+     */
+    suspend fun getConnectionOrReconnect(deviceId: String): AdbConnection {
+        val existing = connections[deviceId]
+        if (existing != null && existing.isConnected) return existing
+
+        // Connection is dead or missing - try to reconnect
+        Log.w(TAG, "Connection lost for $deviceId, attempting reconnect...")
+        val parts = deviceId.split(":")
+        if (parts.size == 2) {
+            disconnect(deviceId)
+            connect(parts[0], parts[1].toIntOrNull() ?: 5555)
+            return connections[deviceId] ?: throw IllegalStateException("Reconnect failed: $deviceId")
+        }
+        throw IllegalStateException("Device not connected: $deviceId")
+    }
+
+    /**
      * Get the ADB connection for a device.
      */
     fun getConnection(deviceId: String): AdbConnection {
@@ -146,7 +165,7 @@ class DeviceManager(
      */
     suspend fun executeCommand(deviceId: String, command: String): String {
         if (isLocal(deviceId)) return localDeviceManager.execute(command)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell(command)
     }
 
@@ -154,7 +173,7 @@ class DeviceManager(
 
     suspend fun getOverview(deviceId: String): DeviceOverview {
         if (isLocal(deviceId)) return localDeviceManager.getOverview()
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val commands = listOf(
             "getprop ro.product.model",                    // 0
             "getprop ro.product.brand",                    // 1
@@ -227,7 +246,7 @@ class DeviceManager(
 
     suspend fun getPackages(deviceId: String, includeSystem: Boolean = false): List<String> {
         if (isLocal(deviceId)) return localDeviceManager.getPackages(includeSystem)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val cmd = if (includeSystem) "pm list packages" else "pm list packages -3"
         val result = conn.shell(cmd)
         return result.lines()
@@ -238,7 +257,7 @@ class DeviceManager(
 
     suspend fun getPackageInfos(deviceId: String, packageNames: List<String>): List<PackageInfo> {
         if (isLocal(deviceId)) return localDeviceManager.getPackageInfos(packageNames)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         if (packageNames.isEmpty()) return emptyList()
 
         // Batch: resolve labels first (1 shell call)
@@ -332,7 +351,7 @@ class DeviceManager(
 
     suspend fun installPackage(deviceId: String, apkPath: String): String {
         if (isLocal(deviceId)) return localDeviceManager.installPackage(apkPath)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         Log.d(TAG, "Installing APK: $apkPath")
 
         // Method 1: Direct install
@@ -363,53 +382,63 @@ class DeviceManager(
      */
     suspend fun pushAndInstall(deviceId: String, localApkPath: String): String {
         if (isLocal(deviceId)) return localDeviceManager.installPackage(localApkPath)
-        val conn = getConnection(deviceId)
         val apkFile = java.io.File(localApkPath)
         val fileSize = apkFile.length()
 
-        Log.d(TAG, "Streaming install: $localApkPath ($fileSize bytes)")
+        // Try streaming install with reconnect on failure
+        for (attempt in 1..2) {
+            try {
+                val conn = getConnectionOrReconnect(deviceId)
+                Log.d(TAG, "Streaming install attempt $attempt: $localApkPath ($fileSize bytes)")
 
-        // Use pm install -S to stream APK data directly (no broken pipe)
-        val stream = conn.open("shell:pm install -S $fileSize -r -t")
+                val stream = conn.open("shell:pm install -S $fileSize -r -t")
 
-        // Write APK data in chunks with flow control
-        val buffer = ByteArray(32768)
-        apkFile.inputStream().use { fis ->
-            var totalWritten = 0L
-            while (totalWritten < fileSize) {
-                val read = fis.read(buffer)
-                if (read < 0) break
-                stream.write(if (read == buffer.size) buffer else buffer.copyOf(read))
-                totalWritten += read
-                if (totalWritten % (1024 * 1024) == 0L || totalWritten == fileSize) {
-                    Log.d(TAG, "Streaming install progress: $totalWritten / $fileSize")
+                // Write APK data in chunks with flow control
+                val buffer = ByteArray(32768)
+                apkFile.inputStream().use { fis ->
+                    var totalWritten = 0L
+                    while (totalWritten < fileSize) {
+                        val read = fis.read(buffer)
+                        if (read < 0) break
+                        stream.write(if (read == buffer.size) buffer else buffer.copyOf(read))
+                        totalWritten += read
+                    }
+                }
+
+                // Wait for pm to process and send result
+                val output = java.io.ByteArrayOutputStream()
+                try {
+                    stream.output.collect { data ->
+                        if (data.isEmpty()) return@collect
+                        output.write(data)
+                    }
+                } catch (_: Exception) {}
+
+                val result = output.toString().trim()
+                Log.d(TAG, "Streaming install result: $result")
+                return result
+            } catch (e: Exception) {
+                Log.w(TAG, "Streaming install attempt $attempt failed: ${e.message}")
+                if (attempt < 2) {
+                    // Connection dropped (likely due to pm install) - reconnect and retry
+                    delay(3000)
+                } else {
+                    throw e
                 }
             }
         }
-
-        // Wait for pm to process and send result (device closes the shell)
-        val output = java.io.ByteArrayOutputStream()
-        try {
-            stream.output.collect { data ->
-                if (data.isEmpty()) return@collect
-                output.write(data)
-            }
-        } catch (_: Exception) {}
-
-        val result = output.toString().trim()
-        Log.d(TAG, "Streaming install result: $result")
-        return result
+        throw IOException("Install failed after retries")
     }
 
     suspend fun uninstallPackage(deviceId: String, packageName: String): String {
         if (isLocal(deviceId)) return localDeviceManager.uninstallPackage(packageName)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("pm uninstall $packageName")
     }
 
     suspend fun startPackage(deviceId: String, packageName: String): String {
         if (isLocal(deviceId)) return localDeviceManager.startPackage(packageName)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         // Get the main activity
         val dumpResult = conn.shell("dumpsys package $packageName | grep -A 1 MAIN")
         val activityLine = dumpResult.lines().find { it.contains("$packageName/") }
@@ -420,31 +449,31 @@ class DeviceManager(
 
     suspend fun stopPackage(deviceId: String, packageName: String): String {
         if (isLocal(deviceId)) return localDeviceManager.stopPackage(packageName)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("am force-stop $packageName")
     }
 
     suspend fun clearPackage(deviceId: String, packageName: String): String {
         if (isLocal(deviceId)) return localDeviceManager.clearPackage(packageName)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("pm clear $packageName")
     }
 
     suspend fun disablePackage(deviceId: String, packageName: String): String {
         if (isLocal(deviceId)) return localDeviceManager.disablePackage(packageName)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("pm disable-user $packageName")
     }
 
     suspend fun enablePackage(deviceId: String, packageName: String): String {
         if (isLocal(deviceId)) return localDeviceManager.enablePackage(packageName)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("pm enable $packageName")
     }
 
     suspend fun getTopPackage(deviceId: String): Pair<String, Int> {
         if (isLocal(deviceId)) return Pair(localDeviceManager.getTopPackage(), 0)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val result = conn.shell("dumpsys activity activities | grep mResumedActivity")
         val regex = Regex("""u0\s+([\w.]+)/([\w.$]+)""")
         val match = regex.find(result)
@@ -459,7 +488,7 @@ class DeviceManager(
 
     suspend fun readDir(deviceId: String, path: String): List<DeviceFile> {
         if (isLocal(deviceId)) return localDeviceManager.readDir(path)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
 
         // Use ls -la which gives sizes and permissions
         val result = conn.shell("ls -la '$path' 2>/dev/null")
@@ -495,19 +524,19 @@ class DeviceManager(
 
     suspend fun deleteFile(deviceId: String, path: String): String {
         if (isLocal(deviceId)) return localDeviceManager.deleteFile(path)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("rm -rf '$path'")
     }
 
     suspend fun createDir(deviceId: String, path: String): String {
         if (isLocal(deviceId)) return localDeviceManager.createDir(path)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("mkdir -p '$path'")
     }
 
     suspend fun moveFile(deviceId: String, src: String, dest: String): String {
         if (isLocal(deviceId)) return localDeviceManager.moveFile(src, dest)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("mv '$src' '$dest'")
     }
 
@@ -516,14 +545,14 @@ class DeviceManager(
      */
     suspend fun findApkFiles(deviceId: String): List<String> {
         if (isLocal(deviceId)) return localDeviceManager.findApkFiles()
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val result = conn.shell("find /sdcard/Download /sdcard /storage/emulated/0/Download /storage/emulated/0 -maxdepth 2 -name '*.apk' -type f 2>/dev/null | sort -u")
         return result.lines().filter { it.isNotBlank() && it.endsWith(".apk") }
     }
 
     suspend fun pullFile(deviceId: String, remotePath: String, localPath: String) {
         // Use a file server approach or cat + base64 encoding
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         // For small files, use base64
         // For large files, use a temporary HTTP server
         // For now, use base64 approach
@@ -533,7 +562,7 @@ class DeviceManager(
     }
 
     suspend fun pushFile(deviceId: String, localPath: String, remotePath: String) {
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val bytes = java.io.File(localPath).readBytes()
         val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
         conn.shell("echo '$base64' | base64 -d > '$remotePath'")
@@ -543,7 +572,7 @@ class DeviceManager(
 
     suspend fun getProcesses(deviceId: String): List<ProcessInfo> {
         if (isLocal(deviceId)) return localDeviceManager.getProcesses()
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val result = conn.shell("ps -A -o PID,USER,%CPU,TIME,RSS,NAME")
         val processes = result.lines()
             .drop(1) // header
@@ -584,7 +613,7 @@ class DeviceManager(
 
     suspend fun getPerformance(deviceId: String): PerformanceSnapshot {
         if (isLocal(deviceId)) return localDeviceManager.getPerformance()
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val results = conn.shell(listOf(
             "cat /proc/stat",
             "cat /proc/meminfo",
@@ -606,13 +635,13 @@ class DeviceManager(
     }
 
     suspend fun getCpuTemperature(deviceId: String): Float {
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val result = conn.shell("dumpsys thermalservice")
         return parseCpuTemperature(result)
     }
 
     suspend fun getFps(deviceId: String, packageName: String): Float {
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val result = conn.shell("dumpsys SurfaceFlinger --list")
         val layers = result.lines().filter { it.contains(packageName) }
         if (layers.isEmpty()) return 0f
@@ -623,7 +652,7 @@ class DeviceManager(
     }
 
     suspend fun getUptime(deviceId: String): Long {
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val result = conn.shell("cat /proc/uptime")
         return result.split("\\s+".toRegex()).firstOrNull()?.toFloatOrNull()?.toLong() ?: 0
     }
@@ -631,7 +660,7 @@ class DeviceManager(
     // ==================== Logcat ====================
 
     suspend fun openLogcat(deviceId: String, onEntry: suspend (LogcatEntry) -> Unit): String {
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val stream = conn.open("shell:logcat -v threadtime")
         val streamId = "logcat_${System.currentTimeMillis()}"
 
@@ -683,7 +712,7 @@ class DeviceManager(
 
     suspend fun screencap(deviceId: String): ByteArray {
         if (isLocal(deviceId)) return localDeviceManager.screencap()
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val result = conn.shell("screencap -p | base64")
         return android.util.Base64.decode(result.trim(), android.util.Base64.DEFAULT)
     }
@@ -692,14 +721,14 @@ class DeviceManager(
 
     suspend fun dumpWindowHierarchy(deviceId: String): String {
         if (isLocal(deviceId)) return localDeviceManager.dumpWindowHierarchy()
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("uiautomator dump /dev/tty 2>/dev/null || uiautomator dump /sdcard/window_dump.xml && cat /sdcard/window_dump.xml")
     }
 
     // ==================== Webview ====================
 
     suspend fun getWebviews(deviceId: String, pid: Int): List<WebviewInfo> {
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val unixResult = conn.shell("cat /proc/net/unix")
         val sockets = unixResult.lines()
             .filter { it.contains("webview_devtools_remote_$pid") }
@@ -727,7 +756,7 @@ class DeviceManager(
     // ==================== Port Forwarding ====================
 
     suspend fun forwardTcp(deviceId: String, remote: String): Int {
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         // List existing forwards to reuse
         val existing = conn.shell("host-serial:${deviceId.split(":").firstOrNull() ?: ""}:list-forward")
         // Parse and find existing or create new
@@ -737,7 +766,7 @@ class DeviceManager(
     }
 
     suspend fun listForwards(deviceId: String): List<PortForward> {
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val result = conn.shell("host:list-forward")
         return result.lines()
             .filter { it.isNotBlank() }
@@ -748,38 +777,38 @@ class DeviceManager(
 
     suspend fun inputKey(deviceId: String, keyCode: Int): String {
         if (isLocal(deviceId)) return localDeviceManager.inputKey(keyCode)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("input keyevent $keyCode")
     }
 
     suspend fun inputText(deviceId: String, text: String): String {
         if (isLocal(deviceId)) return localDeviceManager.inputText(text)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("input text '${text.replace("'", "\\'")}'")
     }
 
     suspend fun inputTap(deviceId: String, x: Int, y: Int): String {
         if (isLocal(deviceId)) return localDeviceManager.inputTap(x, y)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("input tap $x $y")
     }
 
     suspend fun inputSwipe(deviceId: String, x1: Int, y1: Int, x2: Int, y2: Int, duration: Int = 300): String {
         if (isLocal(deviceId)) return localDeviceManager.inputTap(x1, y1)
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("input swipe $x1 $y1 $x2 $y2 $duration")
     }
 
     // ==================== Settings ====================
 
     suspend fun getFontScale(deviceId: String): Float {
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         val result = conn.shell("settings get system font_scale")
         return result.toFloatOrNull() ?: 1.0f
     }
 
     suspend fun setFontScale(deviceId: String, scale: Float): String {
-        val conn = getConnection(deviceId)
+        val conn = getConnectionOrReconnect(deviceId)
         return conn.shell("settings put system font_scale $scale")
     }
 
