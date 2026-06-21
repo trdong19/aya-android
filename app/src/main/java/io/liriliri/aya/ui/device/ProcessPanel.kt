@@ -9,9 +9,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
-import androidx.compose.material3.pulltorefresh.PullRefreshIndicator
-import androidx.compose.material3.pulltorefresh.pullRefresh
-import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -150,16 +148,10 @@ fun ProcessPanel(
 
         // Process list with pull-to-refresh
         @OptIn(ExperimentalMaterial3Api::class)
-        val pullRefreshState = rememberPullToRefreshState(isRefreshing = { isLoading })
-        LaunchedEffect(pullRefreshState.isRefreshing) {
-            if (pullRefreshState.isRefreshing) {
-                viewModel.loadProcesses(deviceId)
-            }
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .pullRefresh(pullRefreshState)
+        PullToRefreshBox(
+            isRefreshing = isLoading,
+            onRefresh = { viewModel.loadProcesses(deviceId) },
+            modifier = Modifier.fillMaxSize()
         ) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
@@ -170,12 +162,6 @@ fun ProcessPanel(
                     ProcessItem(process = process)
                 }
             }
-            @OptIn(ExperimentalMaterial3Api::class)
-            PullRefreshIndicator(
-                refreshing = isLoading,
-                state = pullRefreshState,
-                modifier = Modifier.align(Alignment.TopCenter)
-            )
         }
     }
 }
