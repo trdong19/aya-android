@@ -71,11 +71,6 @@ class DeviceConnectViewModel @Inject constructor(
     private val _lanDevices = MutableStateFlow<List<String>>(emptyList())
     val lanDevices: StateFlow<List<String>> = _lanDevices.asStateFlow()
 
-    // Pairing
-    private val _pairing = MutableStateFlow(false)
-    val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
-    private val _pairResult = MutableStateFlow<String?>(null)
-    val pairResult: StateFlow<String?> = _pairResult.asStateFlow()
 
     val hasLocalAccess: Boolean get() = localDeviceManager.isAvailable
 
@@ -214,23 +209,6 @@ class DeviceConnectViewModel @Inject constructor(
         }
     }
 
-    fun pair(pairHost: String, pairPort: String, code: String) {
-        if (pairHost.isBlank() || code.isBlank()) {
-            _pairResult.value = "请输入 IP 和配对码"
-            return
-        }
-        viewModelScope.launch {
-            _pairing.value = true
-            _pairResult.value = null
-            try {
-                val result = deviceManager.pair(pairHost, pairPort.toIntOrNull() ?: 37721, code)
-                _pairResult.value = "✅ $result"
-            } catch (e: Exception) {
-                _pairResult.value = "❌ ${e.message}"
-            }
-            _pairing.value = false
-        }
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -247,13 +225,6 @@ fun DeviceConnectScreen(
     val history by viewModel.history.collectAsState()
     val scanning by viewModel.scanning.collectAsState()
     val lanDevices by viewModel.lanDevices.collectAsState()
-    val pairing by viewModel.pairing.collectAsState()
-    val pairResult by viewModel.pairResult.collectAsState()
-
-    var showPairDialog by remember { mutableStateOf(false) }
-    var pairHost by remember { mutableStateOf("") }
-    var pairPort by remember { mutableStateOf("37721") }
-    var pairCode by remember { mutableStateOf("") }
 
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
@@ -474,17 +445,6 @@ fun DeviceConnectScreen(
                 }
             }
 
-            // Pair button - for one-time ADB key registration
-            OutlinedButton(
-                onClick = { showPairDialog = true },
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(Icons.Default.VpnKey, null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("ADB 配对（免重复授权）")
-            }
-
             Spacer(modifier = Modifier.height(12.dp))
 
             // Content area with scrolling
@@ -592,64 +552,6 @@ fun DeviceConnectScreen(
         }
     }
 
-    // Pair dialog
-    if (showPairDialog) {
-        AlertDialog(
-            onDismissRequest = { if (!pairing) showPairDialog = false },
-            title = { Text("ADB 配对") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "在远程设备上: 开发者选项 → 无线调试 → 使用配对码配对设备",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    OutlinedTextField(
-                        value = pairHost,
-                        onValueChange = { pairHost = it },
-                        label = { Text("设备 IP") },
-                        placeholder = { Text("192.168.31.245") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = pairPort,
-                        onValueChange = { pairPort = it },
-                        label = { Text("配对端口") },
-                        placeholder = { Text("37721") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = pairCode,
-                        onValueChange = { pairCode = it },
-                        label = { Text("6位配对码") },
-                        placeholder = { Text("123456") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    if (pairing) {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        Text("正在配对...", style = MaterialTheme.typography.bodySmall)
-                    }
-                    pairResult?.let {
-                        Text(it, style = MaterialTheme.typography.bodySmall,
-                            color = if (it.startsWith("✅")) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.error)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = { viewModel.pair(pairHost, pairPort, pairCode) },
-                    enabled = !pairing
-                ) { Text("配对") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showPairDialog = false }) { Text("关闭") }
-            }
-        )
-    }
 }
 
 @Composable

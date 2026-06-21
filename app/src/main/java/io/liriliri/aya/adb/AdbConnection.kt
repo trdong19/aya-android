@@ -265,26 +265,22 @@ class AdbConnection(
             msg.isAuth -> {
                 when (msg.arg0) {
                     AdbProtocol.AUTH_TYPE_TOKEN -> {
-                        // Device sent a token, sign it with our private key
                         val token = msg.data ?: return
                         Log.d(TAG, "AUTH_TOKEN received, tokenLen=${token.size}, authAttempts=$authAttempts")
 
                         if (authAttempts == 0) {
-                            // First attempt: sign with our private key
+                            // First AUTH_TOKEN: try signature (key might be persisted on device)
                             val signed = crypto.signPayload(token)
                             authAttempts++
-                            Log.d(TAG, "Sending AUTH_SIGNATURE, sigLen=${signed.size}")
+                            Log.d(TAG, "Sending AUTH_SIGNATURE (attempt $authAttempts)")
                             sendMessage(AdbProtocol.auth(AdbProtocol.AUTH_TYPE_SIGNATURE, signed))
                         } else {
-                            // Second attempt: device doesn't know our key, send public key
+                            // Signature rejected (device sent AUTH_TOKEN again): send public key
                             val publicKey = crypto.getAdbPublicKeyPayload()
                             authAttempts++
-                            Log.d(TAG, "Sending AUTH_RSA_PUBLIC, keyLen=${publicKey.size}")
+                            Log.d(TAG, "Sending AUTH_RSA_PUBLIC (attempt $authAttempts), keyLen=${publicKey.size}")
                             sendMessage(AdbProtocol.auth(AdbProtocol.AUTH_TYPE_RSA_PUBLIC, publicKey))
                         }
-                    }
-                    AdbProtocol.AUTH_TYPE_SIGNATURE -> {
-                        Log.w(TAG, "Unexpected AUTH_SIGNATURE from device")
                     }
                 }
             }
