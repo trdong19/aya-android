@@ -6,6 +6,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullRefreshIndicator
+import androidx.compose.material3.pulltorefresh.pullRefresh
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -21,34 +24,23 @@ fun OverviewPanel(
     isLoading: Boolean,
     viewModel: MainAppViewModel
 ) {
-    if (isLoading && overview == null) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
-        }
-        return
-    }
-
-    if (overview == null) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("无法获取设备信息")
-        }
-        return
-    }
-
-    // Pull-to-refresh for overview
-    val pullRefreshState = rememberPullToRefreshState()
-    if (pullRefreshState.isInProgress) {
-        LaunchedEffect(true) {
+    @OptIn(ExperimentalMaterial3Api::class)
+    val pullRefreshState = rememberPullToRefreshState(isRefreshing = { isLoading })
+    LaunchedEffect(pullRefreshState.isRefreshing) {
+        if (pullRefreshState.isRefreshing) {
             viewModel.loadOverview(deviceId)
         }
     }
-
-    PullToRefreshBox(
-        isRefreshing = isLoading,
-        onRefresh = { viewModel.loadOverview(deviceId) },
-        state = pullRefreshState,
-        modifier = Modifier.fillMaxSize()
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pullRefresh(pullRefreshState)
     ) {
+    if (isLoading && overview == null) {
+        CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+    } else if (overview == null) {
+        Text("无法获取设备信息", modifier = Modifier.align(Alignment.Center))
+    } else {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -129,7 +121,14 @@ fun OverviewPanel(
 
         item { Spacer(modifier = Modifier.height(16.dp)) }
     }
-    } // PullToRefreshBox
+    } // else
+    @OptIn(ExperimentalMaterial3Api::class)
+    PullRefreshIndicator(
+        refreshing = isLoading,
+        state = pullRefreshState,
+        modifier = Modifier.align(Alignment.TopCenter)
+    )
+    } // Box
 }
 
 @Composable

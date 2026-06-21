@@ -7,6 +7,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullRefreshIndicator
+import androidx.compose.material3.pulltorefresh.pullRefresh
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -271,17 +274,17 @@ fun ApplicationPanel(
         }
 
         // Package list with pull-to-refresh
-        val pullRefreshState = rememberPullToRefreshState()
-        if (pullRefreshState.isInProgress) {
-            LaunchedEffect(true) {
+        @OptIn(ExperimentalMaterial3Api::class)
+        val pullRefreshState = rememberPullToRefreshState(isRefreshing = { isLoading })
+        LaunchedEffect(pullRefreshState.isRefreshing) {
+            if (pullRefreshState.isRefreshing) {
                 viewModel.loadPackages(deviceId)
             }
         }
-        PullToRefreshBox(
-            isRefreshing = isLoading,
-            onRefresh = { viewModel.loadPackages(deviceId) },
-            state = pullRefreshState,
-            modifier = Modifier.fillMaxSize()
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .pullRefresh(pullRefreshState)
         ) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
@@ -296,6 +299,12 @@ fun ApplicationPanel(
                     )
                 }
             }
+            @OptIn(ExperimentalMaterial3Api::class)
+            PullRefreshIndicator(
+                refreshing = isLoading,
+                state = pullRefreshState,
+                modifier = Modifier.align(Alignment.TopCenter)
+            )
         }
     }
 }
