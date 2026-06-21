@@ -129,7 +129,7 @@ class DeviceManager(
      * Execute a simple shell command and return output.
      */
     suspend fun executeCommand(deviceId: String, command: String): String {
-        if (isLocal(deviceId)) return localDeviceManager.executor.execute(command)
+        if (isLocal(deviceId)) return localDeviceManager.execute(command)
         val conn = getConnection(deviceId)
         return conn.shell(command)
     }

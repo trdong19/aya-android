@@ -23,6 +23,11 @@ class LocalDeviceManager(private val context: Context) {
     fun requestShizukuPermission() = executor.requestShizukuPermission()
 
     /**
+     * Execute a shell command via Shizuku/Root.
+     */
+    suspend fun execute(command: String): String = executor.execute(command)
+
+    /**
      * Inject our ADB public key into /data/misc/adb/adb_keys via Shizuku/Root.
      * This allows the ADB daemon to recognize our AUTH SIGNATURE.
      * Required on Android 11+ where AUTH RSA_PUBLIC registration is not supported.
