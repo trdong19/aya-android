@@ -1,5 +1,8 @@
 package io.liriliri.aya.ui.device
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,10 +25,12 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import io.liriliri.aya.adb.DeviceManager
 import io.liriliri.aya.data.PackageInfo
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -147,6 +152,32 @@ class ApplicationViewModel @Inject constructor(
     suspend fun findApkFiles(deviceId: String): List<String> {
         return deviceManager.findApkFiles(deviceId)
     }
+
+    fun installFromUri(deviceId: String, uri: Uri, onResult: (String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val context = io.liriliri.aya.AyaApplication.instance
+                val tmpFile = java.io.File(context.cacheDir, "_aya_install.apk")
+
+                // Copy URI content to temp file
+                withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        tmpFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    } ?: throw Exception("无法读取文件")
+                }
+
+                // Push and install on remote device
+                val result = deviceManager.pushAndInstall(deviceId, tmpFile.absolutePath)
+                tmpFile.delete()
+
+                onResult(if (result.contains("Success", ignoreCase = true)) "✅ $result" else "❌ $result")
+            } catch (e: Exception) {
+                onResult("❌ ${e.message}")
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -161,10 +192,23 @@ fun ApplicationPanel(
     val includeSystem by viewModel.includeSystem.collectAsState()
     val error by viewModel.error.collectAsState()
 
-    var showInstallDialog by remember { mutableStateOf(false) }
-    var apkPath by remember { mutableStateOf("") }
-    var installResult by remember { mutableStateOf<String?>(null) }
     var isInstalling by remember { mutableStateOf(false) }
+    var installStatus by remember { mutableStateOf<String?>(null) }
+
+    // File picker for local APK files
+    val apkPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            isInstalling = true
+            installStatus = "正在安装..."
+            viewModel.installFromUri(deviceId, uri) { result ->
+                installStatus = result
+                isInstalling = false
+                viewModel.loadPackages(deviceId)
+            }
+        }
+    }
 
     LaunchedEffect(deviceId) {
         viewModel.loadPackages(deviceId)
@@ -175,13 +219,29 @@ fun ApplicationPanel(
                 it.label.contains(filter, ignoreCase = true)
     }
 
-    // Install APK dialog
-    if (showInstallDialog) {
-        InstallApkDialog(
-            deviceId = deviceId,
-            viewModel = viewModel,
-            onDismiss = { showInstallDialog = false }
-        )
+    // Install status feedback
+    installStatus?.let { status ->
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (status.startsWith("✅")) MaterialTheme.colorScheme.primaryContainer
+                else if (status.startsWith("❌")) MaterialTheme.colorScheme.errorContainer
+                else MaterialTheme.colorScheme.secondaryContainer
+            )
+        ) {
+            Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (isInstalling) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(status, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                IconButton(onClick = { installStatus = null }, modifier = Modifier.size(24.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -227,7 +287,7 @@ fun ApplicationPanel(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            IconButton(onClick = { showInstallDialog = true }) {
+            IconButton(onClick = { apkPicker.launch("application/vnd.android.package-archive") }) {
                 Icon(Icons.Default.InstallMobile, contentDescription = "安装 APK")
             }
             IconButton(onClick = { viewModel.loadPackages(deviceId) }) {
@@ -442,132 +502,4 @@ private fun DetailRow(label: String, value: String) {
             style = MaterialTheme.typography.bodySmall
         )
     }
-}
-
-@Composable
-private fun InstallApkDialog(
-    deviceId: String,
-    viewModel: ApplicationViewModel,
-    onDismiss: () -> Unit
-) {
-    var apkFiles by remember { mutableStateOf<List<String>>(emptyList()) }
-    var isLoadingApks by remember { mutableStateOf(true) }
-    var selectedPath by remember { mutableStateOf("") }
-    var customPath by remember { mutableStateOf("") }
-    var showCustomInput by remember { mutableStateOf(false) }
-    var installResult by remember { mutableStateOf<String?>(null) }
-    var isInstalling by remember { mutableStateOf(false) }
-
-    // Scan common directories for APK files
-    LaunchedEffect(deviceId) {
-        isLoadingApks = true
-        try {
-            apkFiles = viewModel.findApkFiles(deviceId)
-        } catch (_: Exception) {}
-        isLoadingApks = false
-    }
-
-    AlertDialog(
-        onDismissRequest = { if (!isInstalling) onDismiss() },
-        title = { Text("安装 APK") },
-        text = {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                if (isInstalling) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("正在安装...", style = MaterialTheme.typography.bodySmall)
-                }
-
-                installResult?.let {
-                    Card(
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (it.startsWith("✅")) MaterialTheme.colorScheme.primaryContainer
-                            else MaterialTheme.colorScheme.errorContainer
-                        )
-                    ) {
-                        Text(it, modifier = Modifier.padding(8.dp), style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-
-                if (showCustomInput) {
-                    Text("输入 APK 文件路径：", style = MaterialTheme.typography.bodySmall)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
-                        value = customPath,
-                        onValueChange = { customPath = it },
-                        placeholder = { Text("/sdcard/Download/app.apk") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                } else {
-                    Text("从设备存储选择 APK：", style = MaterialTheme.typography.bodySmall)
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    if (isLoadingApks) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                    } else if (apkFiles.isEmpty()) {
-                        Text(
-                            "未找到 APK 文件",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    } else {
-                        LazyColumn(
-                            modifier = Modifier.heightIn(max = 300.dp),
-                            verticalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            items(apkFiles) { apkPath ->
-                                val name = apkPath.substringAfterLast("/")
-                                val selected = selectedPath == apkPath
-                                Card(
-                                    onClick = { selectedPath = apkPath },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
-                                        else MaterialTheme.colorScheme.surfaceVariant
-                                    )
-                                ) {
-                                    Column(modifier = Modifier.padding(8.dp)) {
-                                        Text(name, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
-                                        Text(
-                                            apkPath,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    val path = if (showCustomInput) customPath else selectedPath
-                    if (path.isNotBlank()) {
-                        isInstalling = true
-                        installResult = null
-                        viewModel.installApk(deviceId, path) { result ->
-                            installResult = result
-                            isInstalling = false
-                        }
-                    }
-                },
-                enabled = !isInstalling && (if (showCustomInput) customPath.isNotBlank() else selectedPath.isNotBlank())
-            ) { Text("安装") }
-        },
-        dismissButton = {
-            Row {
-                TextButton(onClick = { showCustomInput = !showCustomInput }) {
-                    Text(if (showCustomInput) "从列表选" else "手动输入")
-                }
-                TextButton(onClick = onDismiss) { Text("关闭") }
-            }
-        }
-    )
 }

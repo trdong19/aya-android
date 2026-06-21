@@ -415,6 +415,26 @@ fun DeviceConnectScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // LAN scan button - always visible
+            OutlinedButton(
+                onClick = { viewModel.scanLan() },
+                enabled = !scanning,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                if (scanning) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("扫描中...")
+                } else {
+                    Icon(Icons.Default.WifiFind, null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("局域网扫描")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
             // Content area with scrolling
             LazyColumn(
                 modifier = Modifier.weight(1f),
@@ -430,16 +450,6 @@ fun DeviceConnectScreen(
                             Icon(Icons.Default.History, null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("历史记录", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                            Spacer(modifier = Modifier.weight(1f))
-                            OutlinedButton(onClick = { viewModel.scanLan() }, enabled = !scanning) {
-                                if (scanning) {
-                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                } else {
-                                    Icon(Icons.Default.WifiFind, null, modifier = Modifier.size(16.dp))
-                                }
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("局域网扫描", style = MaterialTheme.typography.bodySmall)
-                            }
                         }
                     }
                     items(history) { entry ->

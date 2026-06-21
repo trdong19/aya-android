@@ -156,15 +156,18 @@ class DeviceManager(
             "dumpsys wifi | grep 'mWifiInfo' | grep -o 'SSID: [^,]*' | head -1",  // 13
             "ip addr show wlan0 2>/dev/null | grep 'inet ' | awk '{print \$2}' | cut -d/ -f1",  // 14
             "cat /sys/class/net/wlan0/address 2>/dev/null",  // 15
-            "dumpsys diskstats | grep 'Data-Free:' | head -1",  // 16
+            "cat /proc/partitions 2>/dev/null | grep -v 'name' | grep 'mmcblk' | tail -1",  // 16
             "df /data 2>/dev/null | tail -1",              // 17
-            "dumpsys battery"                              // 18
+            "dumpsys diskstats",                           // 18
+            "dumpsys battery"                              // 19
         )
         val results = conn.shell(commands)
 
-        // Parse storage from df output
-        val dfLine = results.getOrElse(17) { "" }
-        val storageInfo = parseDfOutput(dfLine)
+        // Parse storage - try multiple sources
+        val storageInfo = parseStorageInfo(
+            results.getOrElse(17) { "" },
+            results.getOrElse(18) { "" }
+        )
 
         // Parse WiFi SSID
         val wifiRaw = results.getOrElse(13) { "" }
@@ -194,12 +197,12 @@ class DeviceManager(
             storageTotal = storageInfo.first,
             storageUsed = storageInfo.second,
             resolution = results.getOrElse(11) { "" }.trim(),
-            density = results.getOrElse(12) { "0" }.trim().toIntOrNull() ?: 0,
+            density = parseDensity(results.getOrElse(12) { "" }),
             ip = ip,
             mac = results.getOrElse(15) { "" }.trim(),
             wifiSsid = wifiSsid,
-            batteryLevel = parseBatteryLevel(results.getOrElse(18) { "" }),
-            batteryTemperature = parseBatteryTemperature(results.getOrElse(18) { "" }),
+            batteryLevel = parseBatteryLevel(results.getOrElse(19) { "" }),
+            batteryTemperature = parseBatteryTemperature(results.getOrElse(19) { "" }),
             isRooted = checkRoot(conn)
         )
     }
@@ -335,6 +338,25 @@ class DeviceManager(
         result = conn.shell("cat '$apkPath' | pm install -S \$(stat -c '%s' '$apkPath' 2>/dev/null || echo 0) -r -t 2>&1")
         Log.d(TAG, "Streaming install result: $result")
 
+        return result
+    }
+
+    /**
+     * Push a local APK file to the remote device and install it.
+     */
+    suspend fun pushAndInstall(deviceId: String, localApkPath: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.installPackage(localApkPath)
+        val conn = getConnection(deviceId)
+        val remotePath = "/data/local/tmp/_aya_install.apk"
+
+        Log.d(TAG, "Pushing APK to remote: $localApkPath -> $remotePath")
+        pushFile(deviceId, localApkPath, remotePath)
+
+        Log.d(TAG, "Installing pushed APK...")
+        val result = conn.shell("pm install -r -t '$remotePath' 2>&1")
+        Log.d(TAG, "Push install result: $result")
+
+        conn.shell("rm -f '$remotePath'")
         return result
     }
 
@@ -788,12 +810,68 @@ class DeviceManager(
      *         /dev/block/...  12345678  1234567  11111111  10% /data
      * Returns Pair(totalBytes, usedBytes)
      */
+    /**
+     * Parse density from wm density output.
+     * Possible formats: "Physical density: 480", "480", "Override density: 320"
+     */
+    private fun parseDensity(raw: String): Int {
+        val numbers = Regex("""\d+""").findAll(raw).map { it.value.toIntOrNull() ?: 0 }.toList()
+        // Return override density if present, else physical density, else first number
+        val overrideMatch = Regex("""Override density:\s*(\d+)""").find(raw)
+        if (overrideMatch != null) return overrideMatch.groupValues[1].toIntOrNull() ?: 0
+        return numbers.firstOrNull { it > 0 } ?: 0
+    }
+
+    /**
+     * Parse storage info from df and dumpsys diskstats outputs.
+     */
+    private fun parseStorageInfo(dfLine: String, diskstats: String): Pair<Long, Long> {
+        // Try df output first (more reliable)
+        // df output: Filesystem 1K-blocks Used Available Use% Mounted
+        // But format varies across devices, so try multiple patterns
+        val dfResult = parseDfOutput(dfLine)
+        if (dfResult.first > 0) return dfResult
+
+        // Fallback: parse from dumpsys diskstats
+        // Look for "Data-Free:" and "Data-Total:" patterns
+        val freeMatch = Regex("""Data-Free:\s*([\d.]+)\s*([KMGT]?)""", RegexOption.IGNORE_CASE).find(diskstats)
+        val totalMatch = Regex("""Data-Total:\s*([\d.]+)\s*([KMGT]?)""", RegexOption.IGNORE_CASE).find(diskstats)
+
+        if (freeMatch != null && totalMatch != null) {
+            val freeBytes = parseSizeWithUnit(freeMatch.groupValues[1], freeMatch.groupValues[2])
+            val totalBytes = parseSizeWithUnit(totalMatch.groupValues[1], totalMatch.groupValues[2])
+            return Pair(totalBytes, totalBytes - freeBytes)
+        }
+
+        return Pair(0, 0)
+    }
+
+    private fun parseSizeWithUnit(value: String, unit: String): Long {
+        val num = value.toDoubleOrNull() ?: return 0
+        return when (unit.uppercase()) {
+            "K" -> (num * 1024).toLong()
+            "M" -> (num * 1024 * 1024).toLong()
+            "G" -> (num * 1024 * 1024 * 1024).toLong()
+            "T" -> (num * 1024 * 1024 * 1024 * 1024).toLong()
+            else -> num.toLong()
+        }
+    }
+
     private fun parseDfOutput(line: String): Pair<Long, Long> {
         val parts = line.trim().split("\\s+".toRegex())
-        if (parts.size < 5) return Pair(0, 0)
-        val totalKb = parts[1].toLongOrNull() ?: 0
-        val usedKb = parts[2].toLongOrNull() ?: 0
-        return Pair(totalKb * 1024, usedKb * 1024)
+        if (parts.size < 4) return Pair(0, 0)
+        // Try to find the total and used columns
+        // Format: Filesystem 1K-blocks Used Available Use% Mounted
+        // But some devices have different column counts
+        val nums = parts.mapNotNull { it.toLongOrNull() }
+        if (nums.size >= 3) {
+            // First number is usually total, second is used
+            return Pair(nums[0] * 1024, nums[1] * 1024)
+        }
+        if (nums.size >= 2) {
+            return Pair(nums[0] * 1024, nums[1] * 1024)
+        }
+        return Pair(0, 0)
     }
 
     private fun parseBatteryVoltage(battery: String): Float {
