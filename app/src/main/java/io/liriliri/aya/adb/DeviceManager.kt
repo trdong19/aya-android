@@ -70,6 +70,18 @@ class DeviceManager(
 
             connections[deviceId] = connection
 
+            // Persist our ADB key on the remote device so future connections don't need re-auth
+            try {
+                val keyB64 = crypto.getPublicKeyBase64()
+                Log.d(TAG, "Persisting ADB key on remote device...")
+                connection.shell("mkdir -p /data/misc/adb 2>/dev/null")
+                connection.shell("grep -qF '$keyB64' /data/misc/adb/adb_keys 2>/dev/null || echo '$keyB64' >> /data/misc/adb/adb_keys")
+                connection.shell("chmod 640 /data/misc/adb/adb_keys 2>/dev/null")
+                Log.d(TAG, "ADB key persisted")
+            } catch (e: Exception) {
+                Log.w(TAG, "Key persistence failed (non-fatal): ${e.message}")
+            }
+
             // Get device properties
             Log.d(TAG, "Getting device properties...")
             val props = getDeviceProperties(connection)
@@ -343,20 +355,45 @@ class DeviceManager(
 
     /**
      * Push a local APK file to the remote device and install it.
+     * Uses streaming install (pm install -S) to avoid broken pipe on large files.
      */
     suspend fun pushAndInstall(deviceId: String, localApkPath: String): String {
         if (isLocal(deviceId)) return localDeviceManager.installPackage(localApkPath)
         val conn = getConnection(deviceId)
-        val remotePath = "/data/local/tmp/_aya_install.apk"
+        val apkFile = java.io.File(localApkPath)
+        val fileSize = apkFile.length()
 
-        Log.d(TAG, "Pushing APK to remote: $localApkPath -> $remotePath")
-        pushFile(deviceId, localApkPath, remotePath)
+        Log.d(TAG, "Streaming install: $localApkPath ($fileSize bytes)")
 
-        Log.d(TAG, "Installing pushed APK...")
-        val result = conn.shell("pm install -r -t '$remotePath' 2>&1")
-        Log.d(TAG, "Push install result: $result")
+        // Use pm install -S to stream APK data directly (no broken pipe)
+        val stream = conn.open("shell:pm install -S $fileSize -r -t")
 
-        conn.shell("rm -f '$remotePath'")
+        // Write APK data in chunks with flow control
+        val buffer = ByteArray(32768)
+        apkFile.inputStream().use { fis ->
+            var totalWritten = 0L
+            while (totalWritten < fileSize) {
+                val read = fis.read(buffer)
+                if (read < 0) break
+                stream.write(if (read == buffer.size) buffer else buffer.copyOf(read))
+                totalWritten += read
+                if (totalWritten % (1024 * 1024) == 0L || totalWritten == fileSize) {
+                    Log.d(TAG, "Streaming install progress: $totalWritten / $fileSize")
+                }
+            }
+        }
+
+        // Wait for pm to process and send result (device closes the shell)
+        val output = java.io.ByteArrayOutputStream()
+        try {
+            stream.output.collect { data ->
+                if (data.isEmpty()) return@collect
+                output.write(data)
+            }
+        } catch (_: Exception) {}
+
+        val result = output.toString().trim()
+        Log.d(TAG, "Streaming install result: $result")
         return result
     }
 

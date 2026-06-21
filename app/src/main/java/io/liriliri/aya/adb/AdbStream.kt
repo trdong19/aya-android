@@ -22,11 +22,17 @@ class AdbStream(
     private val ready = CompletableDeferred<Unit>()
     @Volatile var isOpen = true; private set
 
+    // Flow control: track pending writes and wait for OKAY
+    private val writeAck = Channel<Unit>(Channel.UNLIMITED)
+    private var pendingWrites = 0
+
     /**
      * Called by AdbConnection when OKAY is received for this stream.
      */
     fun onReady() {
         ready.complete(Unit)
+        // Signal that a write was acknowledged
+        writeAck.trySend(Unit)
     }
 
     /**
@@ -61,6 +67,12 @@ class AdbStream(
     suspend fun write(data: ByteArray) {
         if (!isOpen) throw IllegalStateException("Stream is closed")
         ready.await()
+        // Flow control: wait for ACK if too many pending writes
+        if (pendingWrites >= 4) {
+            writeAck.receive()
+            pendingWrites--
+        }
+        pendingWrites++
         connection.sendMessage(AdbProtocol.write(localId, remoteId, data))
     }
 

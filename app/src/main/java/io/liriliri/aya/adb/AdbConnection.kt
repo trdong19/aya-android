@@ -25,8 +25,8 @@ class AdbConnection(
 ) {
     companion object {
         private const val TAG = "AdbConnection"
-        private const val CONNECT_TIMEOUT = 10_000
-        private const val READ_TIMEOUT = 30_000
+        private const val CONNECT_TIMEOUT = 15_000
+        private const val READ_TIMEOUT = 120_000  // 2 minutes - batch commands can be slow
     }
 
     private var socket: Socket? = null
@@ -63,6 +63,7 @@ class AdbConnection(
             sock.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT)
             sock.soTimeout = READ_TIMEOUT
             sock.tcpNoDelay = true
+            sock.keepAlive = true
 
             socket = sock
             inputStream = sock.getInputStream()
@@ -171,7 +172,8 @@ class AdbConnection(
      * Execute multiple shell commands separated by a delimiter.
      */
     suspend fun shell(commands: List<String>, separator: String = "aya_separator"): List<String> {
-        val combined = commands.joinToString(" && echo $separator && ")
+        // Use ; instead of && so failed commands don't block subsequent ones
+        val combined = commands.joinToString(" ; echo $separator ; ")
         val result = shell(combined)
         return result.split(separator).map { it.trim() }
     }
