@@ -32,10 +32,14 @@ import io.liriliri.aya.adb.DeviceManager
 import io.liriliri.aya.adb.LocalDeviceManager
 import io.liriliri.aya.data.ConnectionState
 import io.liriliri.aya.data.Device
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -111,42 +115,40 @@ class DeviceConnectViewModel @Inject constructor(
     }
 
     fun scanLan() {
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        viewModelScope.launch {
             _scanning.value = true
             _lanDevices.value = emptyList()
             try {
-                val localIp = java.net.NetworkInterface.getNetworkInterfaces()?.toList()
-                    ?.flatMap { it.inetAddresses.toList() }
-                    ?.firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
-                    ?.hostAddress ?: ""
+                val found = withContext(Dispatchers.IO) {
+                    val localIp = java.net.NetworkInterface.getNetworkInterfaces()?.toList()
+                        ?.flatMap { it.inetAddresses.toList() }
+                        ?.firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
+                        ?.hostAddress ?: ""
 
-                if (localIp.isBlank()) {
-                    _scanning.value = false
-                    return@launch
-                }
+                    if (localIp.isBlank()) return@withContext emptyList<String>()
 
-                val prefix = localIp.substringBeforeLast(".")
-                val found = mutableListOf<String>()
+                    val prefix = localIp.substringBeforeLast(".")
+                    val results = mutableListOf<String>()
 
-                // Scan sequentially in batches to avoid too many connections
-                for (batch in (1..254).chunked(50)) {
-                    val jobs = batch.map { i ->
-                        kotlinx.coroutines.async(kotlinx.coroutines.Dispatchers.IO) {
-                            val ip = "$prefix.$i"
-                            try {
-                                val socket = java.net.Socket()
-                                socket.connect(java.net.InetSocketAddress(ip, 5555), 300)
-                                socket.close()
-                                ip
-                            } catch (_: Exception) { null as String? }
+                    for (batch in (1..254).chunked(50)) {
+                        val jobs = batch.map { i ->
+                            async(Dispatchers.IO) {
+                                val ip = "$prefix.$i"
+                                try {
+                                    val socket = java.net.Socket()
+                                    socket.connect(java.net.InetSocketAddress(ip, 5555), 300)
+                                    socket.close()
+                                    ip
+                                } catch (_: Exception) { null }
+                            }
+                        }
+                        jobs.forEach { job ->
+                            val ip = job.await()
+                            if (ip != null) results.add(ip)
                         }
                     }
-                    jobs.forEach { job ->
-                        val ip: String? = job.await()
-                        if (ip != null) found.add(ip)
-                    }
+                    results
                 }
-
                 _lanDevices.value = found
             } catch (_: Exception) {}
             _scanning.value = false
