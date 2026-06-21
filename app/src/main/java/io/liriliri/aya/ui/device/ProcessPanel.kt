@@ -1,8 +1,10 @@
 package io.liriliri.aya.ui.device
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -10,6 +12,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -25,6 +29,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import kotlin.math.roundToInt
 
 @HiltViewModel
 class ProcessViewModel @Inject constructor(
@@ -140,13 +145,27 @@ fun ProcessPanel(
 
         if (isLoading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
+        // Process list with pull-to-refresh
+        val pullRefreshState = rememberPullToRefreshState()
+        if (pullRefreshState.isInProgress) {
+            LaunchedEffect(true) {
+                viewModel.loadProcesses(deviceId)
+            }
+        }
+        PullToRefreshBox(
+            isRefreshing = isLoading,
+            onRefresh = { viewModel.loadProcesses(deviceId) },
+            state = pullRefreshState,
+            modifier = Modifier.fillMaxSize()
         ) {
-            items(filtered, key = { it.pid }) { process ->
-                ProcessItem(process = process)
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                items(filtered, key = { it.pid }) { process ->
+                    ProcessItem(process = process)
+                }
             }
         }
     }
@@ -154,11 +173,20 @@ fun ProcessPanel(
 
 @Composable
 private fun ProcessItem(process: ProcessInfo) {
+    val cpuColor = getCpuColor(process.cpuPercent)
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
         Row(
             modifier = Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // CPU usage indicator dot
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(cpuColor)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     process.displayName.ifBlank { process.name },
@@ -176,11 +204,10 @@ private fun ProcessItem(process: ProcessInfo) {
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    "${process.cpuPercent}%",
+                    "${process.cpuPercent.roundToInt()}%",
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.Bold,
-                    color = if (process.cpuPercent > 50) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.primary
+                    color = cpuColor
                 )
                 Text(
                     formatMem(process.memoryKb),
@@ -189,6 +216,16 @@ private fun ProcessItem(process: ProcessInfo) {
                 )
             }
         }
+    }
+}
+
+private fun getCpuColor(cpuPercent: Float): Color {
+    return when {
+        cpuPercent >= 80 -> Color(0xFFD32F2F)   // 红色
+        cpuPercent >= 60 -> Color(0xFFF57C00)   // 橙色
+        cpuPercent >= 40 -> Color(0xFFFFA726)   // 浅橙
+        cpuPercent >= 20 -> Color(0xFF66BB6A)   // 绿色
+        else -> Color(0xFF4CAF50)               // 深绿
     }
 }
 

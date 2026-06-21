@@ -208,26 +208,39 @@ fun FilePanel(
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
 
-        // File list
-        val sortedFiles = files.distinctBy { it.path }.sortedWith(compareByDescending<DeviceFile> { it.isDirectory }.thenBy { it.name })
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
+        // File list with pull-to-refresh
+        val pullRefreshState = rememberPullToRefreshState()
+        if (pullRefreshState.isInProgress) {
+            LaunchedEffect(true) {
+                viewModel.navigateTo(deviceId, currentPath)
+            }
+        }
+        PullToRefreshBox(
+            isRefreshing = isLoading,
+            onRefresh = { viewModel.navigateTo(deviceId, currentPath) },
+            state = pullRefreshState,
+            modifier = Modifier.fillMaxSize()
         ) {
-            items(sortedFiles, key = { "${it.path}_${it.name}" }) { file ->
-                FileItem(
-                    file = file,
-                    onClick = {
-                        if (file.isDirectory) {
-                            viewModel.openDirectory(deviceId, file.path)
-                        }
-                    },
-                    onDelete = { viewModel.deleteFile(deviceId, file.path) },
-                    onInstall = if (file.name.endsWith(".apk")) {
-                        { viewModel.installApk(deviceId, file.path) }
-                    } else null
-                )
+            val sortedFiles = files.distinctBy { it.path }.sortedWith(compareByDescending<DeviceFile> { it.isDirectory }.thenBy { it.name })
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                items(sortedFiles, key = { "${it.path}_${it.name}" }) { file ->
+                    FileItem(
+                        file = file,
+                        onClick = {
+                            if (file.isDirectory) {
+                                viewModel.openDirectory(deviceId, file.path)
+                            }
+                        },
+                        onDelete = { viewModel.deleteFile(deviceId, file.path) },
+                        onInstall = if (file.name.endsWith(".apk")) {
+                            { viewModel.installApk(deviceId, file.path) }
+                        } else null
+                    )
+                }
             }
         }
     }

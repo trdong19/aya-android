@@ -220,46 +220,94 @@ class DeviceManager(
     suspend fun getPackageInfos(deviceId: String, packageNames: List<String>): List<PackageInfo> {
         if (isLocal(deviceId)) return localDeviceManager.getPackageInfos(packageNames)
         val conn = getConnection(deviceId)
-        val infos = mutableListOf<PackageInfo>()
+        if (packageNames.isEmpty()) return emptyList()
 
-        for (pkg in packageNames) {
-            try {
-                val info = getPackageInfo(conn, pkg)
-                infos.add(info)
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to get info for $pkg: ${e.message}")
-                infos.add(PackageInfo(packageName = pkg))
-            }
+        // Batch: resolve labels first (1 shell call)
+        val labelMap = try {
+            val labelResult = conn.shell("cmd package dump 2>/dev/null | grep -E 'pkg=|label='")
+            parseAllLabels(labelResult)
+        } catch (_: Exception) { emptyMap<String, String>() }
+
+        // Batch: get dumpsys info for all packages in chunks (avoids 2*N shell calls)
+        val infos = mutableListOf<PackageInfo>()
+        for (chunk in packageNames.chunked(50)) {
+            val chunkInfos = getPackageInfosBatch(conn, chunk, labelMap)
+            infos.addAll(chunkInfos)
         }
         return infos
     }
 
-    private suspend fun getPackageInfo(conn: AdbConnection, pkg: String): PackageInfo {
-        val result = conn.shell("dumpsys package $pkg")
-        val lines = result.lines()
+    private suspend fun getPackageInfosBatch(
+        conn: AdbConnection,
+        packages: List<String>,
+        labelMap: Map<String, String>
+    ): List<PackageInfo> {
+        // Build a single shell command that dumps all packages with separators
+        val sep = "|@@AYA@@|"
+        val cmd = packages.joinToString(" && echo '$sep' && ") { pkg ->
+            "dumpsys package $pkg 2>/dev/null | head -80"
+        }
 
-        // Try to get the app label via pm dump (Android 12+)
-        val label = try {
-            val pmResult = conn.shell("pm dump $pkg 2>/dev/null | grep 'label=' | head -1")
-            val match = Regex("""label=(.+)""").find(pmResult)
-            match?.groupValues?.get(1)?.trim()?.ifBlank { pkg } ?: pkg
-        } catch (_: Exception) {
-            pkg
+        val result = try {
+            conn.shell(cmd)
+        } catch (e: Exception) {
+            Log.w(TAG, "Batch getPackageInfos failed: ${e.message}")
+            return packages.map { PackageInfo(packageName = it, label = labelMap[it] ?: it) }
+        }
+
+        val sections = result.split(sep)
+        return packages.mapIndexed { i, pkg ->
+            val dumpsys = sections.getOrElse(i) { "" }
+            val lines = dumpsys.lines()
+            val label = labelMap[pkg] ?: pkg
+            parsePackageInfoFromDumpsys(pkg, label, dumpsys, lines)
+        }
+    }
+
+    private fun parsePackageInfoFromDumpsys(
+        pkg: String,
+        label: String,
+        dumpsys: String,
+        lines: List<String>
+    ): PackageInfo {
+        // Extract fields from the first ~80 lines of dumpsys package output
+        var versionName = ""
+        var versionCode = 0L
+        var minSdk = 0
+        var targetSdk = 0
+        var codePath = ""
+
+        for (line in lines) {
+            val l = line.trim()
+            if (versionName.isBlank() && l.startsWith("versionName=")) {
+                versionName = l.removePrefix("versionName=").trim()
+            }
+            if (versionCode == 0L && l.startsWith("versionCode=")) {
+                val raw = l.removePrefix("versionCode=").trim()
+                versionCode = raw.split("/").firstOrNull()?.toLongOrNull() ?: 0
+            }
+            if (minSdk == 0 && l.startsWith("minSdk=")) {
+                minSdk = l.removePrefix("minSdk=").trim().toIntOrNull() ?: 0
+            }
+            if (targetSdk == 0 && l.startsWith("targetSdk=")) {
+                targetSdk = l.removePrefix("targetSdk=").trim().toIntOrNull() ?: 0
+            }
+            if (codePath.isBlank() && l.startsWith("codePath=")) {
+                codePath = l.removePrefix("codePath=").trim()
+            }
+            if (versionName.isNotBlank() && versionCode > 0 && codePath.isNotBlank()) break
         }
 
         return PackageInfo(
             packageName = pkg,
             label = label,
-            versionName = extractField(lines, "versionName"),
-            versionCode = extractField(lines, "versionCode=").split("/").firstOrNull()
-                ?.toLongOrNull() ?: 0,
-            minSdkVersion = extractField(lines, "minSdk").toIntOrNull() ?: 0,
-            targetSdkVersion = extractField(lines, "targetSdk").toIntOrNull() ?: 0,
-            firstInstallTime = extractField(lines, "firstInstallTime").toLongOrNull() ?: 0,
-            lastUpdateTime = extractField(lines, "lastUpdateTime").toLongOrNull() ?: 0,
-            apkPath = extractField(lines, "codePath"),
-            isSystem = result.contains("pkgFlags=") && result.contains("SYSTEM"),
-            isEnabled = !result.contains("enabled=false")
+            versionName = versionName,
+            versionCode = versionCode,
+            minSdkVersion = minSdk,
+            targetSdkVersion = targetSdk,
+            apkPath = codePath,
+            isSystem = dumpsys.contains("SYSTEM"),
+            isEnabled = !dumpsys.contains("enabled=false")
         )
     }
 
@@ -341,7 +389,7 @@ class DeviceManager(
         val simple = conn.shell("ls -1F '$path' 2>/dev/null")
         if (simple.isBlank()) return emptyList()
 
-        // Get sizes in batch using stat
+        // Get sizes in batch using stat (single shell call)
         val entries = simple.lines().filter { it.isNotBlank() }
         val sizeMap = try {
             val names = entries.map { it.trimEnd('/', '*', '@', '|', '=') }

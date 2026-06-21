@@ -35,6 +35,20 @@ fun OverviewPanel(
         return
     }
 
+    // Pull-to-refresh for overview
+    val pullRefreshState = rememberPullToRefreshState()
+    if (pullRefreshState.isInProgress) {
+        LaunchedEffect(true) {
+            viewModel.loadOverview(deviceId)
+        }
+    }
+
+    PullToRefreshBox(
+        isRefreshing = isLoading,
+        onRefresh = { viewModel.loadOverview(deviceId) },
+        state = pullRefreshState,
+        modifier = Modifier.fillMaxSize()
+    ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -115,6 +129,7 @@ fun OverviewPanel(
 
         item { Spacer(modifier = Modifier.height(16.dp)) }
     }
+    } // PullToRefreshBox
 }
 
 @Composable

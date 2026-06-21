@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -269,18 +270,31 @@ fun ApplicationPanel(
             }
         }
 
-        // Package list
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+        // Package list with pull-to-refresh
+        val pullRefreshState = rememberPullToRefreshState()
+        if (pullRefreshState.isInProgress) {
+            LaunchedEffect(true) {
+                viewModel.loadPackages(deviceId)
+            }
+        }
+        PullToRefreshBox(
+            isRefreshing = isLoading,
+            onRefresh = { viewModel.loadPackages(deviceId) },
+            state = pullRefreshState,
+            modifier = Modifier.fillMaxSize()
         ) {
-            items(filteredPackages, key = { it.packageName }) { pkg ->
-                PackageItem(
-                    pkg = pkg,
-                    deviceId = deviceId,
-                    viewModel = viewModel
-                )
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                items(filteredPackages, key = { it.packageName }) { pkg ->
+                    PackageItem(
+                        pkg = pkg,
+                        deviceId = deviceId,
+                        viewModel = viewModel
+                    )
+                }
             }
         }
     }
