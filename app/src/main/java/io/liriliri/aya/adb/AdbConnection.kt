@@ -25,14 +25,15 @@ class AdbConnection(
 ) {
     companion object {
         private const val TAG = "AdbConnection"
-        private const val CONNECT_TIMEOUT = 15_000
-        private const val READ_TIMEOUT = 120_000  // 2 minutes - batch commands can be slow
+        private const val CONNECT_TIMEOUT = 60_000  // 60s - user needs time to approve RSA key on remote device
+        private const val READ_TIMEOUT = 120_000    // 2 minutes for batch commands
     }
 
     private var socket: Socket? = null
     private var inputStream: InputStream? = null
     private var outputStream: OutputStream? = null
     private var readJob: Job? = null
+    private var keepaliveJob: Job? = null
 
     private val streams = ConcurrentHashMap<Int, AdbStream>()
     private val nextLocalId = AtomicInteger(1)
@@ -92,6 +93,20 @@ class AdbConnection(
             }
 
             Log.d(TAG, "Connected to device: $deviceBanner")
+
+            // Start keepalive to prevent background disconnection
+            keepaliveJob = CoroutineScope(Dispatchers.IO).launch {
+                while (isConnected && isRunning) {
+                    delay(30_000) // every 30 seconds
+                    try {
+                        if (isConnected) {
+                            shell("echo 1")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Keepalive failed: ${e.message}")
+                    }
+                }
+            }
         } catch (e: Exception) {
             disconnect()
             throw e
@@ -105,6 +120,7 @@ class AdbConnection(
         isConnected = false
         isRunning = false
         readJob?.cancel()
+        keepaliveJob?.cancel()
         try {
             inputStream?.close()
             outputStream?.close()

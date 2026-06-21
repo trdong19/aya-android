@@ -50,41 +50,45 @@ class DeviceManager(
         _connectionState.value = ConnectionState.Connecting
 
         try {
-            // Try to inject our ADB key via Shizuku/Root before connecting.
-            // On Android 11+, AUTH RSA_PUBLIC registration is not supported,
-            // so the key must be pre-registered in /data/misc/adb/adb_keys.
-            try {
-                val localMgr = LocalDeviceManager(context)
-                if (localMgr.isAvailable) {
-                    val keyB64 = crypto.getPublicKeyBase64()
-                    Log.d(TAG, "Injecting ADB key before connect...")
-                    localMgr.injectAdbKey(keyB64)
+            // Try connecting with retries - device may need time for user to approve RSA key
+            var connection: AdbConnection? = null
+            val maxAttempts = 3
+            for (attempt in 1..maxAttempts) {
+                try {
+                    Log.d(TAG, "Connection attempt $attempt/$maxAttempts to $host:$port")
+                    val conn = AdbConnection(host, port, crypto)
+                    conn.connect()
+                    connection = conn
+                    break
+                } catch (e: Exception) {
+                    Log.w(TAG, "Attempt $attempt failed: ${e.message}")
+                    if (attempt < maxAttempts) {
+                        // Wait for user to approve the RSA key on the remote device
+                        delay(5000)
+                    } else {
+                        throw e
+                    }
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Key injection failed (non-fatal): ${e.message}")
             }
-
-            val connection = AdbConnection(host, port, crypto)
-            connection.connect()
+            val conn = connection!!
             Log.d(TAG, "ADB connection established, storing connection...")
 
-            connections[deviceId] = connection
+            connections[deviceId] = conn
 
             // Persist our ADB key on the remote device so future connections don't need re-auth
             try {
                 val keyB64 = crypto.getPublicKeyBase64()
                 Log.d(TAG, "Persisting ADB key on remote device...")
-                connection.shell("mkdir -p /data/misc/adb 2>/dev/null")
-                connection.shell("grep -qF '$keyB64' /data/misc/adb/adb_keys 2>/dev/null || echo '$keyB64' >> /data/misc/adb/adb_keys")
-                connection.shell("chmod 640 /data/misc/adb/adb_keys 2>/dev/null")
-                Log.d(TAG, "ADB key persisted")
+                val keyLine = "$keyB64 aya@android"
+                conn.shell("mkdir -p /data/misc/adb 2>/dev/null ; grep -qF 'aya@android' /data/misc/adb/adb_keys 2>/dev/null || echo '$keyLine' >> /data/misc/adb/adb_keys ; chmod 640 /data/misc/adb/adb_keys 2>/dev/null")
+                Log.d(TAG, "ADB key persisted on remote device")
             } catch (e: Exception) {
                 Log.w(TAG, "Key persistence failed (non-fatal): ${e.message}")
             }
 
             // Get device properties
             Log.d(TAG, "Getting device properties...")
-            val props = getDeviceProperties(connection)
+            val props = getDeviceProperties(conn)
             Log.d(TAG, "Device properties obtained: ${props["ro.product.model"]}")
             val device = Device(
                 id = deviceId,
