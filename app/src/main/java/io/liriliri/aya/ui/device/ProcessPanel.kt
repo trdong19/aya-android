@@ -161,14 +161,15 @@ private fun ProcessItem(process: ProcessInfo) {
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    process.name,
+                    process.displayName.ifBlank { process.name },
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    "PID: ${process.pid} · ${process.user}",
+                    if (process.displayName.isNotBlank()) "${process.name} · PID: ${process.pid}"
+                    else "PID: ${process.pid} · ${process.user}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

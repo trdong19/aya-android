@@ -54,20 +54,29 @@ class FileViewModel @Inject constructor(
         viewModelScope.launch {
             _isLoading.value = true
             try {
-                // Try /sdcard first
-                var files = deviceManager.readDir(deviceId, "/sdcard")
-                var startPath = "/sdcard"
+                // Resolve /sdcard real path (might be symlink)
+                val realPath = try {
+                    deviceManager.executeCommand(deviceId, "readlink -f /sdcard 2>/dev/null || realpath /sdcard 2>/dev/null").trim()
+                } catch (_: Exception) { "" }
 
-                // If empty, try /storage/emulated/0
-                if (files.isEmpty()) {
-                    files = deviceManager.readDir(deviceId, "/storage/emulated/0")
-                    if (files.isNotEmpty()) startPath = "/storage/emulated/0"
-                }
+                val pathsToTry = listOfNotNull(
+                    realPath.ifBlank { null },
+                    "/sdcard",
+                    "/storage/emulated/0",
+                    "/storage/self/primary",
+                    "/"
+                )
 
-                // If still empty, try /
-                if (files.isEmpty()) {
-                    files = deviceManager.readDir(deviceId, "/")
-                    if (files.isNotEmpty()) startPath = "/"
+                var files = emptyList<DeviceFile>()
+                var startPath = "/"
+
+                for (path in pathsToTry) {
+                    val result = deviceManager.readDir(deviceId, path)
+                    if (result.isNotEmpty()) {
+                        files = result
+                        startPath = path
+                        break
+                    }
                 }
 
                 _currentPath.value = startPath

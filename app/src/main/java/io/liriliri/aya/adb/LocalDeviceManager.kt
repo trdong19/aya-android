@@ -258,10 +258,24 @@ class LocalDeviceManager(private val context: Context) {
 
     suspend fun getProcesses(): List<ProcessInfo> {
         val result = executor.execute("ps -A -o PID,USER,%CPU,TIME,RSS,NAME")
-        return result.lines()
+        val processes = result.lines()
             .drop(1)
             .filter { it.isNotBlank() }
             .mapNotNull { parseProcessLine(it) }
+
+        // Batch resolve app labels
+        val uniqueNames = processes.filter { it.name.contains('.') }.map { it.name }.distinct()
+        if (uniqueNames.isNotEmpty()) {
+            try {
+                val batchResult = executor.execute("cmd package dump 2>/dev/null | grep -E 'pkg=|label='")
+                val labelMap = parseAllLabels(batchResult)
+                return processes.map { p ->
+                    val label = labelMap[p.name]
+                    if (label != null) p.copy(displayName = label) else p
+                }
+            } catch (_: Exception) {}
+        }
+        return processes
     }
 
     // ==================== Performance ====================

@@ -90,7 +90,8 @@ data class ProcessInfo(
     val user: String = "",
     val cpuPercent: Float = 0f,
     val memoryKb: Long = 0,
-    val cpuTime: String = ""
+    val cpuTime: String = "",
+    val displayName: String = ""
 )
 
 /**

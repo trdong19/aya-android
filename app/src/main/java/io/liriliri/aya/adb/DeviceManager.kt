@@ -125,29 +125,59 @@ class DeviceManager(
         return connections[deviceId] ?: throw IllegalStateException("Device not connected: $deviceId")
     }
 
+    /**
+     * Execute a simple shell command and return output.
+     */
+    suspend fun executeCommand(deviceId: String, command: String): String {
+        if (isLocal(deviceId)) return localDeviceManager.executor.execute(command)
+        val conn = getConnection(deviceId)
+        return conn.shell(command)
+    }
+
     // ==================== Device Info ====================
 
     suspend fun getOverview(deviceId: String): DeviceOverview {
         if (isLocal(deviceId)) return localDeviceManager.getOverview()
         val conn = getConnection(deviceId)
         val commands = listOf(
-            "getprop ro.product.model",
-            "getprop ro.product.brand",
-            "getprop ro.product.device",
-            "getprop ro.serialno",
-            "getprop ro.build.version.release",
-            "getprop ro.build.version.sdk",
-            "uname -r",
-            "getprop ro.hardware",
-            "cat /proc/cpuinfo | grep processor | wc -l",
-            "getprop ro.product.cpu.abi",
-            "cat /proc/meminfo | grep MemTotal",
-            "wm size",
-            "wm density",
-            "ip addr show wlan0 2>/dev/null | grep 'inet ' | awk '{print \$2}' | cut -d/ -f1",
-            "dumpsys battery"
+            "getprop ro.product.model",                    // 0
+            "getprop ro.product.brand",                    // 1
+            "getprop ro.product.device",                   // 2
+            "getprop ro.serialno",                         // 3
+            "getprop ro.build.version.release",            // 4
+            "getprop ro.build.version.sdk",                // 5
+            "uname -r",                                    // 6
+            "getprop ro.hardware",                         // 7
+            "cat /proc/cpuinfo | grep processor | wc -l",  // 8
+            "getprop ro.product.cpu.abi",                  // 9
+            "cat /proc/meminfo | grep MemTotal",           // 10
+            "wm size",                                     // 11
+            "wm density",                                  // 12
+            "dumpsys wifi | grep 'mWifiInfo' | grep -o 'SSID: [^,]*' | head -1",  // 13
+            "ip addr show wlan0 2>/dev/null | grep 'inet ' | awk '{print \$2}' | cut -d/ -f1",  // 14
+            "cat /sys/class/net/wlan0/address 2>/dev/null",  // 15
+            "dumpsys diskstats | grep 'Data-Free:' | head -1",  // 16
+            "df /data 2>/dev/null | tail -1",              // 17
+            "dumpsys battery"                              // 18
         )
         val results = conn.shell(commands)
+
+        // Parse storage from df output
+        val dfLine = results.getOrElse(17) { "" }
+        val storageInfo = parseDfOutput(dfLine)
+
+        // Parse WiFi SSID
+        val wifiRaw = results.getOrElse(13) { "" }
+        val wifiSsid = Regex("""SSID:\s*"?([^",]+)"?""").find(wifiRaw)?.groupValues?.get(1)?.trim() ?: ""
+
+        // Parse IP - try multiple sources
+        var ip = results.getOrElse(14) { "" }.trim()
+        if (ip.isBlank()) {
+            ip = try {
+                val ipResult = conn.shell("ip route get 1.1.1.1 2>/dev/null | grep -o 'src [0-9.]*' | awk '{print \$2}'")
+                ipResult.trim()
+            } catch (_: Exception) { "" }
+        }
 
         return DeviceOverview(
             model = results.getOrElse(0) { "" },
@@ -161,11 +191,15 @@ class DeviceManager(
             cores = results.getOrElse(8) { "0" }.trim().toIntOrNull() ?: 0,
             abi = results.getOrElse(9) { "" },
             memoryTotal = parseMemoryTotal(results.getOrElse(10) { "" }),
+            storageTotal = storageInfo.first,
+            storageUsed = storageInfo.second,
             resolution = results.getOrElse(11) { "" }.trim(),
             density = results.getOrElse(12) { "0" }.trim().toIntOrNull() ?: 0,
-            ip = results.getOrElse(13) { "" }.trim(),
-            batteryLevel = parseBatteryLevel(results.getOrElse(14) { "" }),
-            batteryTemperature = parseBatteryTemperature(results.getOrElse(14) { "" }),
+            ip = ip,
+            mac = results.getOrElse(15) { "" }.trim(),
+            wifiSsid = wifiSsid,
+            batteryLevel = parseBatteryLevel(results.getOrElse(18) { "" }),
+            batteryTemperature = parseBatteryTemperature(results.getOrElse(18) { "" }),
             isRooted = checkRoot(conn)
         )
     }
@@ -356,10 +390,39 @@ class DeviceManager(
         if (isLocal(deviceId)) return localDeviceManager.getProcesses()
         val conn = getConnection(deviceId)
         val result = conn.shell("ps -A -o PID,USER,%CPU,TIME,RSS,NAME")
-        return result.lines()
+        val processes = result.lines()
             .drop(1) // header
             .filter { it.isNotBlank() }
             .mapNotNull { parseProcessLine(it) }
+
+        // Batch resolve app labels using a single cmd package dump
+        val uniqueNames = processes.filter { it.name.contains('.') }.map { it.name }.distinct()
+        if (uniqueNames.isNotEmpty()) {
+            try {
+                val batchResult = conn.shell("cmd package dump 2>/dev/null | grep -E 'pkg=|label='")
+                val labelMap = parseAllLabels(batchResult)
+                return processes.map { p ->
+                    val label = labelMap[p.name]
+                    if (label != null) p.copy(displayName = label) else p
+                }
+            } catch (_: Exception) {
+                // Fallback: try individual lookups for a few key packages
+                val labelMap = mutableMapOf<String, String>()
+                for (name in uniqueNames.take(20)) {
+                    try {
+                        val r = conn.shell("pm dump $name 2>/dev/null | grep 'label=' | head -1")
+                        val m = Regex("""label=(.+)""").find(r)
+                        val l = m?.groupValues?.get(1)?.trim()?.ifBlank { null }
+                        if (l != null) labelMap[name] = l
+                    } catch (_: Exception) {}
+                }
+                return processes.map { p ->
+                    val label = labelMap[p.name]
+                    if (label != null) p.copy(displayName = label) else p
+                }
+            }
+        }
+        return processes
     }
 
     // ==================== Performance ====================
@@ -579,6 +642,28 @@ class DeviceManager(
         return props
     }
 
+    /**
+     * Parse batch package dump output to extract package->label mapping.
+     */
+    private fun parseAllLabels(output: String): Map<String, String> {
+        val map = mutableMapOf<String, String>()
+        var currentPkg = ""
+        for (line in output.lines()) {
+            val pkgMatch = Regex("""pkg=([^\s]+)""").find(line)
+            if (pkgMatch != null) {
+                currentPkg = pkgMatch.groupValues[1]
+            }
+            val labelMatch = Regex("""label=(.+)""").find(line)
+            if (labelMatch != null && currentPkg.isNotEmpty()) {
+                val label = labelMatch.groupValues[1].trim()
+                if (label.isNotBlank() && label != currentPkg) {
+                    map[currentPkg] = label
+                }
+            }
+        }
+        return map
+    }
+
     private suspend fun checkRoot(conn: AdbConnection): Boolean {
         return try {
             val result = conn.shell("id")
@@ -603,6 +688,20 @@ class DeviceManager(
     private fun parseBatteryLevel(battery: String): Int {
         val match = Regex("""level:\s*(\d+)""").find(battery)
         return match?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    }
+
+    /**
+     * Parse df output line to get storage total and used.
+     * Format: Filesystem     1K-blocks    Used Available Use% Mounted on
+     *         /dev/block/...  12345678  1234567  11111111  10% /data
+     * Returns Pair(totalBytes, usedBytes)
+     */
+    private fun parseDfOutput(line: String): Pair<Long, Long> {
+        val parts = line.trim().split("\\s+".toRegex())
+        if (parts.size < 5) return Pair(0, 0)
+        val totalKb = parts[1].toLongOrNull() ?: 0
+        val usedKb = parts[2].toLongOrNull() ?: 0
+        return Pair(totalKb * 1024, usedKb * 1024)
     }
 
     private fun parseBatteryVoltage(battery: String): Float {
