@@ -646,7 +646,7 @@ fun DeviceConnectScreen(
                 ) { Text("配对") }
             },
             dismissButton = {
-                TextButton(onClick = { showPairDialog = false; pairResult = null }) { Text("关闭") }
+                TextButton(onClick = { showPairDialog = false }) { Text("关闭") }
             }
         )
     }

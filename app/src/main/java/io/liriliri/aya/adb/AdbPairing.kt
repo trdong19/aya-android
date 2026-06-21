@@ -116,7 +116,7 @@ object AdbPairing {
             val out = socket.getOutputStream()
 
             // 1. Exchange banners
-            out.write("TNG::pairing::SHA256withRSA\0".toByteArray())
+            out.write("TNG::pairing::SHA256withRSA".toByteArray() + byteArrayOf(0))
             out.flush()
             val banner = readUntilNull(inp)
             Log.d(TAG, "Banner: $banner")
