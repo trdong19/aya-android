@@ -826,20 +826,16 @@ class DeviceManager(
      * Parse storage info from df and dumpsys diskstats outputs.
      */
     private fun parseStorageInfo(dfLine: String, diskstats: String): Pair<Long, Long> {
-        // Try df output first (more reliable)
-        // df output: Filesystem 1K-blocks Used Available Use% Mounted
-        // But format varies across devices, so try multiple patterns
+        // Try df output first
         val dfResult = parseDfOutput(dfLine)
         if (dfResult.first > 0) return dfResult
 
         // Fallback: parse from dumpsys diskstats
-        // Look for "Data-Free:" and "Data-Total:" patterns
-        val freeMatch = Regex("""Data-Free:\s*([\d.]+)\s*([KMGT]?)""", RegexOption.IGNORE_CASE).find(diskstats)
-        val totalMatch = Regex("""Data-Total:\s*([\d.]+)\s*([KMGT]?)""", RegexOption.IGNORE_CASE).find(diskstats)
-
-        if (freeMatch != null && totalMatch != null) {
-            val freeBytes = parseSizeWithUnit(freeMatch.groupValues[1], freeMatch.groupValues[2])
-            val totalBytes = parseSizeWithUnit(totalMatch.groupValues[1], totalMatch.groupValues[2])
+        // Format: "Data-Free: 66455356K / 244474720K total = 27% free"
+        val diskMatch = Regex("""Data-Free:\s*([\d.]+)\s*([KMGT]?)\s*/\s*([\d.]+)\s*([KMGT]?)""", RegexOption.IGNORE_CASE).find(diskstats)
+        if (diskMatch != null) {
+            val freeBytes = parseSizeWithUnit(diskMatch.groupValues[1], diskMatch.groupValues[2])
+            val totalBytes = parseSizeWithUnit(diskMatch.groupValues[3], diskMatch.groupValues[4])
             return Pair(totalBytes, totalBytes - freeBytes)
         }
 
