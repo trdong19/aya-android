@@ -56,7 +56,105 @@ class DeviceConnectViewModel @Inject constructor(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    // Device history
+    data class DeviceHistoryEntry(val host: String, val port: Int, val name: String, val lastUsed: Long)
+    private val _history = MutableStateFlow<List<DeviceHistoryEntry>>(emptyList())
+    val history: StateFlow<List<DeviceHistoryEntry>> = _history.asStateFlow()
+
+    // LAN scan
+    private val _scanning = MutableStateFlow(false)
+    val scanning: StateFlow<Boolean> = _scanning.asStateFlow()
+    private val _lanDevices = MutableStateFlow<List<String>>(emptyList())
+    val lanDevices: StateFlow<List<String>> = _lanDevices.asStateFlow()
+
     val hasLocalAccess: Boolean get() = localDeviceManager.isAvailable
+
+    private val prefs = try {
+        val app = androidx.startup.AppInitializer.getInstance(
+            io.liriliri.aya.AyaApplication::class.java
+        )
+        null // Will initialize in init block
+    } catch (_: Exception) { null }
+
+    init {
+        loadHistory()
+    }
+
+    private fun getPrefs(): android.content.SharedPreferences? {
+        return try {
+            val ctx = io.liriliri.aya.AyaApplication.instance
+            ctx.getSharedPreferences("aya_devices", android.content.Context.MODE_PRIVATE)
+        } catch (_: Exception) { null }
+    }
+
+    private fun loadHistory() {
+        val p = getPrefs() ?: return
+        val set = p.getStringSet("history", emptySet()) ?: emptySet()
+        _history.value = set.mapNotNull { entry ->
+            val parts = entry.split("|")
+            if (parts.size >= 3) {
+                DeviceHistoryEntry(parts[0], parts[1].toIntOrNull() ?: 5555, parts[2], parts.getOrNull(3)?.toLongOrNull() ?: 0)
+            } else null
+        }.sortedByDescending { it.lastUsed }
+    }
+
+    private fun saveToHistory(host: String, port: Int, name: String = "") {
+        val p = getPrefs() ?: return
+        val current = _history.value.toMutableList()
+        current.removeAll { it.host == host && it.port == port }
+        current.add(0, DeviceHistoryEntry(host, port, name, System.currentTimeMillis()))
+        val set = current.take(20).map { "${it.host}|${it.port}|${it.name}|${it.lastUsed}" }.toSet()
+        p.edit().putStringSet("history", set).apply()
+        _history.value = current.take(20)
+    }
+
+    fun removeHistory(host: String, port: Int) {
+        val p = getPrefs() ?: return
+        val current = _history.value.toMutableList()
+        current.removeAll { it.host == host && it.port == port }
+        val set = current.map { "${it.host}|${it.port}|${it.name}|${it.lastUsed}" }.toSet()
+        p.edit().putStringSet("history", set).apply()
+        _history.value = current
+    }
+
+    fun scanLan() {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            _scanning.value = true
+            _lanDevices.value = emptyList()
+            try {
+                // Get local IP range
+                val localIp = java.net.NetworkInterface.getNetworkInterfaces()?.toList()
+                    ?.flatMap { it.inetAddresses.toList() }
+                    ?.firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
+                    ?.hostAddress ?: ""
+
+                if (localIp.isBlank()) return@launch
+
+                val prefix = localIp.substringBeforeLast(".")
+                val found = mutableListOf<String>()
+
+                // Scan common ports (5555) in parallel
+                val jobs = (1..254).map { i ->
+                    kotlinx.coroutines.async {
+                        val ip = "$prefix.$i"
+                        try {
+                            val socket = java.net.Socket()
+                            socket.connect(java.net.InetSocketAddress(ip, 5555), 200)
+                            socket.close()
+                            ip
+                        } catch (_: Exception) { null }
+                    }
+                }
+                jobs.forEach { job ->
+                    val ip = job.await()
+                    if (ip != null) found.add(ip)
+                }
+
+                _lanDevices.value = found
+            } catch (_: Exception) {}
+            _scanning.value = false
+        }
+    }
 
     fun updateHost(value: String) { _host.value = value }
     fun updatePort(value: String) { _port.value = value }
@@ -74,6 +172,7 @@ class DeviceConnectViewModel @Inject constructor(
             try {
                 _error.value = null
                 val device = deviceManager.connect(h, p)
+                saveToHistory(h, p, device.model)
                 onSuccess(device.id)
             } catch (e: Exception) {
                 _error.value = e.message ?: "连接失败"
@@ -122,6 +221,9 @@ fun DeviceConnectScreen(
     val connectionState by viewModel.connectionState.collectAsState()
     val connectedDevices by viewModel.connectedDevices.collectAsState()
     val error by viewModel.error.collectAsState()
+    val history by viewModel.history.collectAsState()
+    val scanning by viewModel.scanning.collectAsState()
+    val lanDevices by viewModel.lanDevices.collectAsState()
 
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
@@ -312,85 +414,117 @@ fun DeviceConnectScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // Previously connected devices
-            if (connectedDevices.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "已连接的设备",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    items(connectedDevices) { device ->
-                        DeviceCard(
-                            device = device,
-                            onClick = { viewModel.connectToDevice(device, onDeviceConnected) },
-                            onDisconnect = { viewModel.disconnect(device.id) }
-                        )
+            // Content area with scrolling
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // History section
+                if (history.isNotEmpty()) {
+                    item {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.History, null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("历史记录", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Spacer(modifier = Modifier.weight(1f))
+                            OutlinedButton(onClick = { viewModel.scanLan() }, enabled = !scanning) {
+                                if (scanning) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(Icons.Default.WifiFind, null, modifier = Modifier.size(16.dp))
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("局域网扫描", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                    items(history) { entry ->
+                        Card(
+                            onClick = {
+                                viewModel.updateHost(entry.host)
+                                viewModel.updatePort(entry.port.toString())
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.PhoneAndroid, null, tint = MaterialTheme.colorScheme.primary)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(entry.name.ifBlank { entry.host }, fontWeight = FontWeight.Medium)
+                                    Text("${entry.host}:${entry.port}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                IconButton(onClick = { viewModel.removeHistory(entry.host, entry.port) }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Default.Close, null, modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        }
                     }
                 }
-            } else {
-                // Tips - Method 1: USB ADB
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            "方法一：USB 转 WiFi ADB（推荐）",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        TipItem("1. 用 USB 线连接目标设备到电脑")
-                        TipItem("2. 电脑执行: adb tcpip 5555")
-                        TipItem("3. 拔掉 USB 线")
-                        TipItem("4. 输入设备 IP 地址，端口填 5555")
-                        TipItem("5. 点击「连接远程设备」")
+
+                // LAN scan results
+                if (lanDevices.isNotEmpty()) {
+                    item {
+                        Text("局域网设备", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    }
+                    items(lanDevices) { ip ->
+                        Card(
+                            onClick = {
+                                viewModel.updateHost(ip)
+                                viewModel.updatePort("5555")
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Wifi, null, tint = MaterialTheme.colorScheme.secondary)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(ip)
+                            }
+                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Tips - Method 2: Wireless debugging
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            "方法二：无线调试（Android 11+）",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        TipItem("1. 开启「开发者选项」→「无线调试」")
-                        TipItem("2. 先用电脑配对: adb pair <IP>:<配对端口> <配对码>")
-                        TipItem("3. 配对成功后，输入无线调试显示的 IP 和端口")
-                        TipItem("4. 点击「连接远程设备」")
-                        Text(
-                            "⚠️ 无线调试每次重启需重新配对",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
+                // Tips when no history
+                if (history.isEmpty() && lanDevices.isEmpty()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text("USB 转 WiFi ADB", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                                Spacer(modifier = Modifier.height(8.dp))
+                                TipItem("1. USB 连接目标设备到电脑")
+                                TipItem("2. 电脑执行: adb tcpip 5555")
+                                TipItem("3. 拔掉 USB，输入设备 IP")
+                            }
+                        }
+                    }
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Text("无线调试 (Android 11+)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                                Spacer(modifier = Modifier.height(8.dp))
+                                TipItem("1. 开发者选项 → 无线调试")
+                                TipItem("2. 电脑配对: adb pair <IP>:<端口> <码>")
+                                TipItem("3. 输入显示的 IP 和端口连接")
+                            }
+                        }
                     }
                 }
             }
