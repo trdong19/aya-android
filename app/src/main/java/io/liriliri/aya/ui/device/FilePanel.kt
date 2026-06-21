@@ -155,6 +155,14 @@ class FileViewModel @Inject constructor(
             } catch (_: Exception) {}
         }
     }
+
+    fun installApk(deviceId: String, apkPath: String) {
+        viewModelScope.launch {
+            try {
+                deviceManager.installPackage(deviceId, apkPath)
+            } catch (_: Exception) {}
+        }
+    }
 }
 
 @Composable
@@ -215,7 +223,10 @@ fun FilePanel(
                             viewModel.openDirectory(deviceId, file.path)
                         }
                     },
-                    onDelete = { viewModel.deleteFile(deviceId, file.path) }
+                    onDelete = { viewModel.deleteFile(deviceId, file.path) },
+                    onInstall = if (file.name.endsWith(".apk")) {
+                        { viewModel.installApk(deviceId, file.path) }
+                    } else null
                 )
             }
         }
@@ -226,7 +237,8 @@ fun FilePanel(
 private fun FileItem(
     file: DeviceFile,
     onClick: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onInstall: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -277,6 +289,13 @@ private fun FileItem(
                     Icon(Icons.Default.MoreVert, contentDescription = null)
                 }
                 DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                    if (onInstall != null) {
+                        DropdownMenuItem(
+                            text = { Text("安装此 APK") },
+                            leadingIcon = { Icon(Icons.Default.InstallMobile, null, tint = MaterialTheme.colorScheme.primary) },
+                            onClick = { showMenu = false; onInstall() }
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("删除", color = MaterialTheme.colorScheme.error) },
                         leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },

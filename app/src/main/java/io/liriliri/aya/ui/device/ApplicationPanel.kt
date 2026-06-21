@@ -128,6 +128,18 @@ class ApplicationViewModel @Inject constructor(
             }
         }
     }
+
+    fun installApk(deviceId: String, apkPath: String, onResult: (String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val result = deviceManager.installPackage(deviceId, apkPath)
+                onResult(result)
+                loadPackages(deviceId)
+            } catch (e: Exception) {
+                onResult(e.message ?: "安装失败")
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -142,6 +154,10 @@ fun ApplicationPanel(
     val includeSystem by viewModel.includeSystem.collectAsState()
     val error by viewModel.error.collectAsState()
 
+    var showInstallDialog by remember { mutableStateOf(false) }
+    var apkPath by remember { mutableStateOf("") }
+    var installResult by remember { mutableStateOf<String?>(null) }
+
     LaunchedEffect(deviceId) {
         viewModel.loadPackages(deviceId)
     }
@@ -149,6 +165,41 @@ fun ApplicationPanel(
     val filteredPackages = packages.filter {
         filter.isBlank() || it.packageName.contains(filter, ignoreCase = true) ||
                 it.label.contains(filter, ignoreCase = true)
+    }
+
+    // Install APK dialog
+    if (showInstallDialog) {
+        AlertDialog(
+            onDismissRequest = { showInstallDialog = false },
+            title = { Text("安装 APK") },
+            text = {
+                Column {
+                    Text("输入设备上 APK 文件的路径：")
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = apkPath,
+                        onValueChange = { apkPath = it },
+                        placeholder = { Text("/sdcard/app.apk") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    installResult?.let {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(it, color = if (it.contains("Success")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.installApk(deviceId, apkPath) { result ->
+                        installResult = result
+                    }
+                }) { Text("安装") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showInstallDialog = false; installResult = null }) { Text("取消") }
+            }
+        )
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -194,6 +245,9 @@ fun ApplicationPanel(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            IconButton(onClick = { showInstallDialog = true }) {
+                Icon(Icons.Default.InstallMobile, contentDescription = "安装 APK")
+            }
             IconButton(onClick = { viewModel.loadPackages(deviceId) }) {
                 Icon(Icons.Default.Refresh, contentDescription = "刷新")
             }
