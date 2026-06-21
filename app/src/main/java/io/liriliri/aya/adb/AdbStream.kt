@@ -1,9 +1,9 @@
 package io.liriliri.aya.adb
 
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.consumeAsFlow
 import java.io.ByteArrayOutputStream
 
 /**
@@ -14,8 +14,10 @@ class AdbStream(
     val remoteId: Int = 0,
     private val connection: AdbConnection
 ) {
-    private val _output = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
-    val output: SharedFlow<ByteArray> = _output.asSharedFlow()
+    // Use Channel instead of SharedFlow to prevent readLoop from blocking on backpressure.
+    // Channel never suspends the sender (trySend) and buffers data for the receiver.
+    private val _channel = Channel<ByteArray>(Channel.UNLIMITED)
+    val output: SharedFlow<ByteArray> = _channel.consumeAsFlow()
 
     private val ready = CompletableDeferred<Unit>()
     @Volatile var isOpen = true; private set
@@ -40,7 +42,8 @@ class AdbStream(
     suspend fun onData(data: ByteArray) {
         // Send ACK (OKAY) back to the device
         connection.sendMessage(AdbProtocol.okay(localId, remoteId))
-        _output.emit(data)
+        // Use trySend (non-blocking) to prevent readLoop from suspending on backpressure
+        _channel.trySend(data)
     }
 
     /**
@@ -48,7 +51,8 @@ class AdbStream(
      */
     fun onClose() {
         isOpen = false
-        _output.tryEmit(ByteArray(0)) // signal end
+        _channel.trySend(ByteArray(0)) // signal end
+        _channel.close()
     }
 
     /**
