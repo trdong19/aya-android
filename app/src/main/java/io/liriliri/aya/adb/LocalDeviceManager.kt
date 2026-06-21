@@ -235,16 +235,27 @@ class LocalDeviceManager(private val context: Context) {
 
         if (files.isNotEmpty()) return files
 
-        // Fallback: use ls -1F (appends / to dirs, * to exec)
+        // Fallback: ls -1F + stat for sizes
         val simple = executor.execute("ls -1F '$path' 2>/dev/null")
-        return simple.lines()
-            .filter { it.isNotBlank() }
-            .map { entry ->
-                val isDir = entry.endsWith("/")
-                val name = entry.trimEnd('/', '*', '@', '|', '=')
-                val fullPath = if (path.endsWith("/")) "$path$name" else "$path/$name"
-                DeviceFile(name = name, path = fullPath, isDirectory = isDir, size = 0, permissions = "")
+        if (simple.isBlank()) return emptyList()
+
+        val entries = simple.lines().filter { it.isNotBlank() }
+        val sizeMap = try {
+            val names = entries.map { it.trimEnd('/', '*', '@', '|', '=') }
+            val statCmd = names.joinToString(";") { "stat -c '%n %s' '$path/$it' 2>/dev/null" }
+            val statResult = executor.execute(statCmd)
+            statResult.lines().filter { it.isNotBlank() }.associate {
+                val parts = it.split(" ", limit = 2)
+                parts[0].substringAfterLast('/') to (parts.getOrNull(1)?.toLongOrNull() ?: 0)
             }
+        } catch (_: Exception) { emptyMap() }
+
+        return entries.map { entry ->
+            val isDir = entry.endsWith("/")
+            val name = entry.trimEnd('/', '*', '@', '|', '=')
+            val fullPath = if (path.endsWith("/")) "$path$name" else "$path/$name"
+            DeviceFile(name = name, path = fullPath, isDirectory = isDir, size = sizeMap[name] ?: 0, permissions = "")
+        }
     }
 
     suspend fun deleteFile(path: String): String {

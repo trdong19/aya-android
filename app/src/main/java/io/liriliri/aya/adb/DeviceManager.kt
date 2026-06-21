@@ -328,7 +328,8 @@ class DeviceManager(
     suspend fun readDir(deviceId: String, path: String): List<DeviceFile> {
         if (isLocal(deviceId)) return localDeviceManager.readDir(path)
         val conn = getConnection(deviceId)
-        // Try ls -la first
+
+        // Use ls -la which gives sizes and permissions
         val result = conn.shell("ls -la '$path' 2>/dev/null")
         val files = result.lines()
             .filter { it.isNotBlank() && !it.startsWith("total") }
@@ -336,16 +337,28 @@ class DeviceManager(
 
         if (files.isNotEmpty()) return files
 
-        // Fallback: use ls -1F (appends / to dirs, * to exec)
+        // Fallback: ls -1F + stat for sizes
         val simple = conn.shell("ls -1F '$path' 2>/dev/null")
-        return simple.lines()
-            .filter { it.isNotBlank() }
-            .map { entry ->
-                val isDir = entry.endsWith("/")
-                val name = entry.trimEnd('/', '*', '@', '|', '=')
-                val fullPath = if (path.endsWith("/")) "$path$name" else "$path/$name"
-                DeviceFile(name = name, path = fullPath, isDirectory = isDir, size = 0, permissions = "")
+        if (simple.isBlank()) return emptyList()
+
+        // Get sizes in batch using stat
+        val entries = simple.lines().filter { it.isNotBlank() }
+        val sizeMap = try {
+            val names = entries.map { it.trimEnd('/', '*', '@', '|', '=') }
+            val statCmd = names.joinToString(";") { "stat -c '%n %s' '$path/$it' 2>/dev/null" }
+            val statResult = conn.shell(statCmd)
+            statResult.lines().filter { it.isNotBlank() }.associate {
+                val parts = it.split(" ", limit = 2)
+                parts[0].substringAfterLast('/') to (parts.getOrNull(1)?.toLongOrNull() ?: 0)
             }
+        } catch (_: Exception) { emptyMap() }
+
+        return entries.map { entry ->
+            val isDir = entry.endsWith("/")
+            val name = entry.trimEnd('/', '*', '@', '|', '=')
+            val fullPath = if (path.endsWith("/")) "$path$name" else "$path/$name"
+            DeviceFile(name = name, path = fullPath, isDirectory = isDir, size = sizeMap[name] ?: 0, permissions = "")
+        }
     }
 
     suspend fun deleteFile(deviceId: String, path: String): String {

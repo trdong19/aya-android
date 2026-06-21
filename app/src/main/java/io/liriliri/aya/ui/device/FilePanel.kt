@@ -201,12 +201,13 @@ fun FilePanel(
         }
 
         // File list
+        val sortedFiles = files.distinctBy { it.path }.sortedWith(compareByDescending<DeviceFile> { it.isDirectory }.thenBy { it.name })
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
-            items(files.sortedWith(compareByDescending<DeviceFile> { it.isDirectory }.thenBy { it.name }), key = { it.path }) { file ->
+            items(sortedFiles, key = { "${it.path}_${it.name}" }) { file ->
                 FileItem(
                     file = file,
                     onClick = {
