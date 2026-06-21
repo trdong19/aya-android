@@ -78,10 +78,31 @@ class DeviceManager(
             // Persist our ADB key on the remote device so future connections don't need re-auth
             try {
                 val keyB64 = crypto.getPublicKeyBase64()
-                Log.d(TAG, "Persisting ADB key on remote device...")
                 val keyLine = "$keyB64 aya@android"
-                conn.shell("mkdir -p /data/misc/adb 2>/dev/null ; grep -qF 'aya@android' /data/misc/adb/adb_keys 2>/dev/null || echo '$keyLine' >> /data/misc/adb/adb_keys ; chmod 640 /data/misc/adb/adb_keys 2>/dev/null")
-                Log.d(TAG, "ADB key persisted on remote device")
+                Log.d(TAG, "Persisting ADB key on remote device (keyLen=${keyB64.length})...")
+
+                // Try with su (Magisk/root) first - most reliable
+                var persisted = false
+                try {
+                    // Use printf to avoid shell escaping issues with base64
+                    conn.shell("su -c 'grep -qF aya@android /data/misc/adb/adb_keys 2>/dev/null || printf \"%s aya@android\\n\" \"$keyB64\" >> /data/misc/adb/adb_keys'")
+                    persisted = true
+                    Log.d(TAG, "Key persisted via su")
+                } catch (e: Exception) {
+                    Log.w(TAG, "su key inject failed: ${e.message}")
+                }
+
+                // Fallback: try as shell user (unlikely to work on Android 11+)
+                if (!persisted) {
+                    try {
+                        conn.shell("grep -qF aya@android /data/misc/adb/adb_keys 2>/dev/null || printf \"%s aya@android\\n\" \"$keyB64\" >> /data/misc/adb/adb_keys")
+                        persisted = true
+                        Log.d(TAG, "Key persisted via shell")
+                    } catch (_: Exception) {}
+                }
+
+                if (persisted) Log.d(TAG, "ADB key persisted successfully")
+                else Log.w(TAG, "Could not persist ADB key")
             } catch (e: Exception) {
                 Log.w(TAG, "Key persistence failed (non-fatal): ${e.message}")
             }
