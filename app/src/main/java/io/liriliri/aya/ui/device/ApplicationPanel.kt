@@ -136,12 +136,16 @@ class ApplicationViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 val result = deviceManager.installPackage(deviceId, apkPath)
-                onResult(result)
+                onResult(if (result.contains("Success", ignoreCase = true)) "✅ $result" else "❌ $result")
                 loadPackages(deviceId)
             } catch (e: Exception) {
-                onResult(e.message ?: "安装失败")
+                onResult("❌ ${e.message}")
             }
         }
+    }
+
+    suspend fun findApkFiles(deviceId: String): List<String> {
+        return deviceManager.findApkFiles(deviceId)
     }
 }
 
@@ -160,6 +164,7 @@ fun ApplicationPanel(
     var showInstallDialog by remember { mutableStateOf(false) }
     var apkPath by remember { mutableStateOf("") }
     var installResult by remember { mutableStateOf<String?>(null) }
+    var isInstalling by remember { mutableStateOf(false) }
 
     LaunchedEffect(deviceId) {
         viewModel.loadPackages(deviceId)
@@ -172,36 +177,10 @@ fun ApplicationPanel(
 
     // Install APK dialog
     if (showInstallDialog) {
-        AlertDialog(
-            onDismissRequest = { showInstallDialog = false },
-            title = { Text("安装 APK") },
-            text = {
-                Column {
-                    Text("输入设备上 APK 文件的路径：")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = apkPath,
-                        onValueChange = { apkPath = it },
-                        placeholder = { Text("/sdcard/app.apk") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    installResult?.let {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(it, color = if (it.contains("Success")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.installApk(deviceId, apkPath) { result ->
-                        installResult = result
-                    }
-                }) { Text("安装") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showInstallDialog = false; installResult = null }) { Text("取消") }
-            }
+        InstallApkDialog(
+            deviceId = deviceId,
+            viewModel = viewModel,
+            onDismiss = { showInstallDialog = false }
         )
     }
 
@@ -463,4 +442,132 @@ private fun DetailRow(label: String, value: String) {
             style = MaterialTheme.typography.bodySmall
         )
     }
+}
+
+@Composable
+private fun InstallApkDialog(
+    deviceId: String,
+    viewModel: ApplicationViewModel,
+    onDismiss: () -> Unit
+) {
+    var apkFiles by remember { mutableStateOf<List<String>>(emptyList()) }
+    var isLoadingApks by remember { mutableStateOf(true) }
+    var selectedPath by remember { mutableStateOf("") }
+    var customPath by remember { mutableStateOf("") }
+    var showCustomInput by remember { mutableStateOf(false) }
+    var installResult by remember { mutableStateOf<String?>(null) }
+    var isInstalling by remember { mutableStateOf(false) }
+
+    // Scan common directories for APK files
+    LaunchedEffect(deviceId) {
+        isLoadingApks = true
+        try {
+            apkFiles = viewModel.findApkFiles(deviceId)
+        } catch (_: Exception) {}
+        isLoadingApks = false
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!isInstalling) onDismiss() },
+        title = { Text("安装 APK") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                if (isInstalling) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("正在安装...", style = MaterialTheme.typography.bodySmall)
+                }
+
+                installResult?.let {
+                    Card(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (it.startsWith("✅")) MaterialTheme.colorScheme.primaryContainer
+                            else MaterialTheme.colorScheme.errorContainer
+                        )
+                    ) {
+                        Text(it, modifier = Modifier.padding(8.dp), style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+
+                if (showCustomInput) {
+                    Text("输入 APK 文件路径：", style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = customPath,
+                        onValueChange = { customPath = it },
+                        placeholder = { Text("/sdcard/Download/app.apk") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    Text("从设备存储选择 APK：", style = MaterialTheme.typography.bodySmall)
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    if (isLoadingApks) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    } else if (apkFiles.isEmpty()) {
+                        Text(
+                            "未找到 APK 文件",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.heightIn(max = 300.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            items(apkFiles) { apkPath ->
+                                val name = apkPath.substringAfterLast("/")
+                                val selected = selectedPath == apkPath
+                                Card(
+                                    onClick = { selectedPath = apkPath },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer
+                                        else MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                ) {
+                                    Column(modifier = Modifier.padding(8.dp)) {
+                                        Text(name, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                                        Text(
+                                            apkPath,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val path = if (showCustomInput) customPath else selectedPath
+                    if (path.isNotBlank()) {
+                        isInstalling = true
+                        installResult = null
+                        viewModel.installApk(deviceId, path) { result ->
+                            installResult = result
+                            isInstalling = false
+                        }
+                    }
+                },
+                enabled = !isInstalling && (if (showCustomInput) customPath.isNotBlank() else selectedPath.isNotBlank())
+            ) { Text("安装") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { showCustomInput = !showCustomInput }) {
+                    Text(if (showCustomInput) "从列表选" else "手动输入")
+                }
+                TextButton(onClick = onDismiss) { Text("关闭") }
+            }
+        }
+    )
 }

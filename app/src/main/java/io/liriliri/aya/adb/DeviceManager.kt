@@ -448,6 +448,16 @@ class DeviceManager(
         return conn.shell("mv '$src' '$dest'")
     }
 
+    /**
+     * Find APK files in common directories on the device.
+     */
+    suspend fun findApkFiles(deviceId: String): List<String> {
+        if (isLocal(deviceId)) return localDeviceManager.findApkFiles()
+        val conn = getConnection(deviceId)
+        val result = conn.shell("find /sdcard/Download /sdcard /storage/emulated/0/Download /storage/emulated/0 -maxdepth 2 -name '*.apk' -type f 2>/dev/null | sort -u")
+        return result.lines().filter { it.isNotBlank() && it.endsWith(".apk") }
+    }
+
     suspend fun pullFile(deviceId: String, remotePath: String, localPath: String) {
         // Use a file server approach or cat + base64 encoding
         val conn = getConnection(deviceId)

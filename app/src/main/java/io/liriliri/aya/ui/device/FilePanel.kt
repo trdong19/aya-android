@@ -98,12 +98,18 @@ class FileViewModel @Inject constructor(
         }
     }
 
-    fun navigateTo(deviceId: String, path: String) {
+    fun navigateTo(deviceId: String, path: String, addToHistory: Boolean = false) {
+        val safePath = path.ifBlank { "/" }.let { if (it == "..") "/" else it }
         viewModelScope.launch {
             _isLoading.value = true
             try {
-                _currentPath.value = path
-                _files.value = deviceManager.readDir(deviceId, path)
+                _currentPath.value = safePath
+                _files.value = deviceManager.readDir(deviceId, safePath)
+                if (addToHistory) {
+                    if (pathHistory.lastOrNull() != safePath) {
+                        pathHistory.add(safePath)
+                    }
+                }
             } catch (e: Exception) {
                 _files.value = emptyList()
             } finally {
@@ -114,21 +120,23 @@ class FileViewModel @Inject constructor(
 
     fun navigateUp(deviceId: String) {
         val current = _currentPath.value
-        if (current == "/") return
-        val parent = current.substringBeforeLast("/", "/")
-        navigateTo(deviceId, parent)
+        if (current == "/" || current.isBlank()) return
+        val parent = current.substringBeforeLast("/", "/").ifBlank { "/" }
+        if (parent == current) return
+        navigateTo(deviceId, parent, addToHistory = true)
     }
 
     fun goBack(deviceId: String) {
         if (pathHistory.size > 1) {
             pathHistory.removeLast()
-            navigateTo(deviceId, pathHistory.last())
+            val target = pathHistory.last()
+            _currentPath.value = target
+            navigateTo(deviceId, target, addToHistory = false)
         }
     }
 
     fun openDirectory(deviceId: String, path: String) {
-        pathHistory.add(path)
-        navigateTo(deviceId, path)
+        navigateTo(deviceId, path, addToHistory = true)
     }
 
     fun deleteFile(deviceId: String, path: String) {

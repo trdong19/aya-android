@@ -270,6 +270,11 @@ class LocalDeviceManager(private val context: Context) {
         return executor.execute("mv '$src' '$dest'")
     }
 
+    suspend fun findApkFiles(): List<String> {
+        val result = executor.execute("find /sdcard/Download /sdcard /storage/emulated/0/Download /storage/emulated/0 -maxdepth 2 -name '*.apk' -type f 2>/dev/null | sort -u")
+        return result.lines().filter { it.isNotBlank() && it.endsWith(".apk") }
+    }
+
     // ==================== Process Management ====================
 
     suspend fun getProcesses(): List<ProcessInfo> {
