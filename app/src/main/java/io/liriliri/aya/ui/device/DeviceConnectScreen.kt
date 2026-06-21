@@ -69,13 +69,6 @@ class DeviceConnectViewModel @Inject constructor(
 
     val hasLocalAccess: Boolean get() = localDeviceManager.isAvailable
 
-    private val prefs = try {
-        val app = androidx.startup.AppInitializer.getInstance(
-            io.liriliri.aya.AyaApplication::class.java
-        )
-        null // Will initialize in init block
-    } catch (_: Exception) { null }
-
     init {
         loadHistory()
     }
@@ -122,32 +115,36 @@ class DeviceConnectViewModel @Inject constructor(
             _scanning.value = true
             _lanDevices.value = emptyList()
             try {
-                // Get local IP range
                 val localIp = java.net.NetworkInterface.getNetworkInterfaces()?.toList()
                     ?.flatMap { it.inetAddresses.toList() }
                     ?.firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
                     ?.hostAddress ?: ""
 
-                if (localIp.isBlank()) return@launch
+                if (localIp.isBlank()) {
+                    _scanning.value = false
+                    return@launch
+                }
 
                 val prefix = localIp.substringBeforeLast(".")
                 val found = mutableListOf<String>()
 
-                // Scan common ports (5555) in parallel
-                val jobs = (1..254).map { i ->
-                    kotlinx.coroutines.async {
-                        val ip = "$prefix.$i"
-                        try {
-                            val socket = java.net.Socket()
-                            socket.connect(java.net.InetSocketAddress(ip, 5555), 200)
-                            socket.close()
-                            ip
-                        } catch (_: Exception) { null }
+                // Scan sequentially in batches to avoid too many connections
+                for (batch in (1..254).chunked(50)) {
+                    val jobs = batch.map { i ->
+                        kotlinx.coroutines.async(kotlinx.coroutines.Dispatchers.IO) {
+                            val ip = "$prefix.$i"
+                            try {
+                                val socket = java.net.Socket()
+                                socket.connect(java.net.InetSocketAddress(ip, 5555), 300)
+                                socket.close()
+                                ip
+                            } catch (_: Exception) { null as String? }
+                        }
                     }
-                }
-                jobs.forEach { job ->
-                    val ip = job.await()
-                    if (ip != null) found.add(ip)
+                    jobs.forEach { job ->
+                        val ip: String? = job.await()
+                        if (ip != null) found.add(ip)
+                    }
                 }
 
                 _lanDevices.value = found
