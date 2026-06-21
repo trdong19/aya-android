@@ -551,21 +551,57 @@ class DeviceManager(
     }
 
     suspend fun pullFile(deviceId: String, remotePath: String, localPath: String) {
-        // Use a file server approach or cat + base64 encoding
-        val conn = getConnectionOrReconnect(deviceId)
-        // For small files, use base64
-        // For large files, use a temporary HTTP server
-        // For now, use base64 approach
-        val result = conn.shell("base64 '$remotePath'")
-        val bytes = android.util.Base64.decode(result, android.util.Base64.DEFAULT)
-        java.io.File(localPath).writeBytes(bytes)
+        pullFileStream(deviceId, remotePath, localPath)
     }
 
     suspend fun pushFile(deviceId: String, localPath: String, remotePath: String) {
+        pushFileStream(deviceId, java.io.FileInputStream(localPath), remotePath)
+    }
+
+    /**
+     * Stream upload: pipe local input to remote file via base64 encoding.
+     */
+    suspend fun pushFileStream(deviceId: String, input: java.io.InputStream, remotePath: String) {
         val conn = getConnectionOrReconnect(deviceId)
-        val bytes = java.io.File(localPath).readBytes()
-        val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-        conn.shell("echo '$base64' | base64 -d > '$remotePath'")
+        val stream = conn.open("shell:base64 -d > '$remotePath'")
+        val buffer = ByteArray(4096) // 4KB raw = ~5.3KB base64 per chunk
+        val base64Buf = java.io.ByteArrayOutputStream()
+        var totalRead = 0L
+
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            val encoded = android.util.Base64.encodeToString(
+                if (read == buffer.size) buffer else buffer.copyOf(read),
+                android.util.Base64.NO_WRAP
+            )
+            // Write base64 line (some implementations need line breaks)
+            stream.write("$encoded\n".toByteArray())
+            totalRead += read
+        }
+        stream.close()
+        Log.d(TAG, "pushFileStream done: $totalRead bytes -> $remotePath")
+    }
+
+    /**
+     * Stream download: read remote file via base64 and decode to local file.
+     */
+    suspend fun pullFileStream(deviceId: String, remotePath: String, localPath: String) {
+        val conn = getConnectionOrReconnect(deviceId)
+        val stream = conn.open("shell:base64 '$remotePath'")
+        val base64Buf = java.io.ByteArrayOutputStream()
+
+        try {
+            stream.output.collect { data ->
+                if (data.isEmpty()) return@collect
+                base64Buf.write(data)
+            }
+        } catch (_: Exception) {}
+
+        val base64Str = base64Buf.toString().replace("\n", "").replace("\r", "").replace(" ", "")
+        val bytes = android.util.Base64.decode(base64Str, android.util.Base64.DEFAULT)
+        java.io.File(localPath).writeBytes(bytes)
+        Log.d(TAG, "pullFileStream done: $remotePath -> $localPath (${bytes.size} bytes)")
     }
 
     // ==================== Process Management ====================

@@ -1,5 +1,8 @@
 package io.liriliri.aya.ui.device
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -12,6 +15,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -21,12 +25,13 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import io.liriliri.aya.adb.DeviceManager
 import io.liriliri.aya.data.DeviceFile
+import io.liriliri.aya.util.NotificationHelper
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.*
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -173,15 +178,76 @@ class FileViewModel @Inject constructor(
             _installResult.value = "正在安装 ${apkPath.substringAfterLast("/")}..."
             try {
                 val result = deviceManager.installPackage(deviceId, apkPath)
-                _installResult.value = if (result.contains("Success", ignoreCase = true)) {
-                    "✅ 安装成功: ${apkPath.substringAfterLast("/")}"
-                } else {
-                    "❌ 安装失败: $result"
-                }
+                val success = result.contains("Success", ignoreCase = true)
+                val msg = if (success) "✅ 安装成功: ${apkPath.substringAfterLast("/")}" else "❌ 安装失败: $result"
+                _installResult.value = msg
+                val ctx = io.liriliri.aya.AyaApplication.instance
+                if (success) NotificationHelper.showSuccess(ctx, "安装成功", apkPath.substringAfterLast("/"))
+                else NotificationHelper.showError(ctx, "安装失败", result)
             } catch (e: Exception) {
                 _installResult.value = "❌ 安装出错: ${e.message}"
+                NotificationHelper.showError(io.liriliri.aya.AyaApplication.instance, "安装出错", e.message ?: "")
             }
         }
+    }
+
+    fun uploadFile(deviceId: String, uri: Uri) {
+        viewModelScope.launch {
+            _installResult.value = "正在上传文件..."
+            try {
+                val context = io.liriliri.aya.AyaApplication.instance
+                val fileName = getFileName(context, uri)
+                val remotePath = "${_currentPath.value}/$fileName"
+
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        deviceManager.pushFileStream(deviceId, input, remotePath)
+                    } ?: throw Exception("无法读取文件")
+                }
+
+                _installResult.value = "✅ 上传成功: $fileName"
+                NotificationHelper.showSuccess(context, "上传成功", "$fileName → $remotePath")
+                navigateTo(deviceId, _currentPath.value)
+            } catch (e: Exception) {
+                _installResult.value = "❌ 上传失败: ${e.message}"
+                NotificationHelper.showError(io.liriliri.aya.AyaApplication.instance, "上传失败", e.message ?: "")
+            }
+        }
+    }
+
+    fun downloadFile(deviceId: String, remotePath: String, fileName: String) {
+        viewModelScope.launch {
+            _installResult.value = "正在下载: $fileName..."
+            try {
+                val context = io.liriliri.aya.AyaApplication.instance
+                val localDir = android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_DOWNLOADS
+                )
+                localDir.mkdirs()
+                val localFile = java.io.File(localDir, fileName)
+
+                withContext(Dispatchers.IO) {
+                    deviceManager.pullFileStream(deviceId, remotePath, localFile.absolutePath)
+                }
+
+                _installResult.value = "✅ 下载成功: ${localFile.absolutePath}"
+                NotificationHelper.showSuccess(context, "下载成功", "$fileName → ${localFile.absolutePath}")
+            } catch (e: Exception) {
+                _installResult.value = "❌ 下载失败: ${e.message}"
+                NotificationHelper.showError(io.liriliri.aya.AyaApplication.instance, "下载失败", e.message ?: "")
+            }
+        }
+    }
+
+    private fun getFileName(context: android.content.Context, uri: Uri): String {
+        var name = "upload_file"
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (cursor.moveToFirst() && idx >= 0) {
+                name = cursor.getString(idx) ?: name
+            }
+        }
+        return name
     }
 
     fun clearInstallResult() { _installResult.value = null }
@@ -196,6 +262,13 @@ fun FilePanel(
     val currentPath by viewModel.currentPath.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val installResult by viewModel.installResult.collectAsState()
+
+    val context = LocalContext.current
+    val uploadLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { viewModel.uploadFile(deviceId, it) }
+    }
 
     LaunchedEffect(deviceId) {
         viewModel.initialize(deviceId)
@@ -222,6 +295,9 @@ fun FilePanel(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            IconButton(onClick = { uploadLauncher.launch("*/*") }) {
+                Icon(Icons.Default.Upload, contentDescription = "上传文件")
+            }
             IconButton(onClick = { viewModel.navigateTo(deviceId, currentPath) }) {
                 Icon(Icons.Default.Refresh, contentDescription = "刷新")
             }
@@ -277,6 +353,9 @@ fun FilePanel(
                             }
                         },
                         onDelete = { viewModel.deleteFile(deviceId, file.path) },
+                        onDownload = if (!file.isDirectory) {
+                            { viewModel.downloadFile(deviceId, file.path, file.name) }
+                        } else null,
                         onInstall = if (file.name.endsWith(".apk")) {
                             { viewModel.installApk(deviceId, file.path) }
                         } else null
@@ -292,6 +371,7 @@ private fun FileItem(
     file: DeviceFile,
     onClick: () -> Unit,
     onDelete: () -> Unit,
+    onDownload: (() -> Unit)? = null,
     onInstall: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -348,6 +428,13 @@ private fun FileItem(
                             text = { Text("安装此 APK") },
                             leadingIcon = { Icon(Icons.Default.InstallMobile, null, tint = MaterialTheme.colorScheme.primary) },
                             onClick = { showMenu = false; onInstall() }
+                        )
+                    }
+                    if (onDownload != null) {
+                        DropdownMenuItem(
+                            text = { Text("下载到本机") },
+                            leadingIcon = { Icon(Icons.Default.Download, null, tint = MaterialTheme.colorScheme.primary) },
+                            onClick = { showMenu = false; onDownload() }
                         )
                     }
                     DropdownMenuItem(

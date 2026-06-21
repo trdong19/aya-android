@@ -77,10 +77,13 @@ class ApplicationViewModel @Inject constructor(
     fun uninstallPackage(deviceId: String, packageName: String) {
         viewModelScope.launch {
             try {
-                deviceManager.uninstallPackage(deviceId, packageName)
+                val result = deviceManager.uninstallPackage(deviceId, packageName)
+                val ctx = io.liriliri.aya.AyaApplication.instance
+                io.liriliri.aya.util.NotificationHelper.showSuccess(ctx, "卸载成功", packageName)
                 loadPackages(deviceId)
             } catch (e: Exception) {
                 _error.value = e.message
+                io.liriliri.aya.util.NotificationHelper.showError(io.liriliri.aya.AyaApplication.instance, "卸载失败", e.message ?: "")
             }
         }
     }
@@ -141,10 +144,15 @@ class ApplicationViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 val result = deviceManager.installPackage(deviceId, apkPath)
-                onResult(if (result.contains("Success", ignoreCase = true)) "✅ $result" else "❌ $result")
+                val success = result.contains("Success", ignoreCase = true)
+                onResult(if (success) "✅ $result" else "❌ $result")
+                val ctx = io.liriliri.aya.AyaApplication.instance
+                if (success) io.liriliri.aya.util.NotificationHelper.showSuccess(ctx, "安装成功", apkPath.substringAfterLast("/"))
+                else io.liriliri.aya.util.NotificationHelper.showError(ctx, "安装失败", result)
                 loadPackages(deviceId)
             } catch (e: Exception) {
                 onResult("❌ ${e.message}")
+                io.liriliri.aya.util.NotificationHelper.showError(io.liriliri.aya.AyaApplication.instance, "安装出错", e.message ?: "")
             }
         }
     }
