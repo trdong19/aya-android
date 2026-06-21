@@ -66,11 +66,14 @@ class DeviceManager(
 
             val connection = AdbConnection(host, port, crypto)
             connection.connect()
+            Log.d(TAG, "ADB connection established, storing connection...")
 
             connections[deviceId] = connection
 
             // Get device properties
+            Log.d(TAG, "Getting device properties...")
             val props = getDeviceProperties(connection)
+            Log.d(TAG, "Device properties obtained: ${props["ro.product.model"]}")
             val device = Device(
                 id = deviceId,
                 host = host,
