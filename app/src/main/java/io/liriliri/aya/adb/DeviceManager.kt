@@ -294,10 +294,24 @@ class DeviceManager(
     suspend fun readDir(deviceId: String, path: String): List<DeviceFile> {
         if (isLocal(deviceId)) return localDeviceManager.readDir(path)
         val conn = getConnection(deviceId)
-        val result = conn.shell("ls -la '$path' 2>/dev/null || ls '$path' 2>/dev/null")
-        return result.lines()
+        // Try ls -la first
+        val result = conn.shell("ls -la '$path' 2>/dev/null")
+        val files = result.lines()
             .filter { it.isNotBlank() && !it.startsWith("total") }
             .mapNotNull { parseLsLine(it, path) }
+
+        if (files.isNotEmpty()) return files
+
+        // Fallback: use ls -1F (appends / to dirs, * to exec)
+        val simple = conn.shell("ls -1F '$path' 2>/dev/null")
+        return simple.lines()
+            .filter { it.isNotBlank() }
+            .map { entry ->
+                val isDir = entry.endsWith("/")
+                val name = entry.trimEnd('/', '*', '@', '|', '=')
+                val fullPath = if (path.endsWith("/")) "$path$name" else "$path/$name"
+                DeviceFile(name = name, path = fullPath, isDirectory = isDir, size = 0, permissions = "")
+            }
     }
 
     suspend fun deleteFile(deviceId: String, path: String): String {

@@ -131,12 +131,31 @@ class LocalDeviceManager(private val context: Context) {
 
     suspend fun getPackageInfos(packageNames: List<String>): List<PackageInfo> {
         val infos = mutableListOf<PackageInfo>()
+
+        // Batch get all labels at once using cmd package dump
+        // This is much faster than calling per-package
+        val labelMap = try {
+            val allLabels = executor.execute("cmd package dump 2>/dev/null | grep -E 'pkg=|label=' ")
+            parseAllLabels(allLabels)
+        } catch (_: Exception) {
+            emptyMap()
+        }
+
         for (pkg in packageNames) {
             try {
                 val result = executor.execute("dumpsys package $pkg")
                 val lines = result.lines()
+
+                // Get label: try batch result first, then per-package pm dump
+                val label = labelMap[pkg] ?: try {
+                    val pmResult = executor.execute("pm dump $pkg 2>/dev/null | grep 'label=' | head -1")
+                    val match = Regex("""label=(.+)""").find(pmResult)
+                    match?.groupValues?.get(1)?.trim()?.ifBlank { null }
+                } catch (_: Exception) { null } ?: pkg
+
                 infos.add(PackageInfo(
                     packageName = pkg,
+                    label = label,
                     versionName = extractField(lines, "versionName"),
                     versionCode = extractField(lines, "versionCode=").split("/").firstOrNull()
                         ?.toLongOrNull() ?: 0,
@@ -149,6 +168,28 @@ class LocalDeviceManager(private val context: Context) {
             }
         }
         return infos
+    }
+
+    /**
+     * Parse batch package dump output to extract package->label mapping.
+     */
+    private fun parseAllLabels(output: String): Map<String, String> {
+        val map = mutableMapOf<String, String>()
+        var currentPkg = ""
+        for (line in output.lines()) {
+            val pkgMatch = Regex("""pkg=([^\s]+)""").find(line)
+            if (pkgMatch != null) {
+                currentPkg = pkgMatch.groupValues[1]
+            }
+            val labelMatch = Regex("""label=(.+)""").find(line)
+            if (labelMatch != null && currentPkg.isNotEmpty()) {
+                val label = labelMatch.groupValues[1].trim()
+                if (label.isNotBlank() && label != currentPkg) {
+                    map[currentPkg] = label
+                }
+            }
+        }
+        return map
     }
 
     suspend fun installPackage(apkPath: String): String {
@@ -182,10 +223,23 @@ class LocalDeviceManager(private val context: Context) {
     // ==================== File Management ====================
 
     suspend fun readDir(path: String): List<DeviceFile> {
-        val result = executor.execute("ls -la '$path' 2>/dev/null || ls '$path' 2>/dev/null")
-        return result.lines()
+        val result = executor.execute("ls -la '$path' 2>/dev/null")
+        val files = result.lines()
             .filter { it.isNotBlank() && !it.startsWith("total") }
             .mapNotNull { parseLsLine(it, path) }
+
+        if (files.isNotEmpty()) return files
+
+        // Fallback: use ls -1F (appends / to dirs, * to exec)
+        val simple = executor.execute("ls -1F '$path' 2>/dev/null")
+        return simple.lines()
+            .filter { it.isNotBlank() }
+            .map { entry ->
+                val isDir = entry.endsWith("/")
+                val name = entry.trimEnd('/', '*', '@', '|', '=')
+                val fullPath = if (path.endsWith("/")) "$path$name" else "$path/$name"
+                DeviceFile(name = name, path = fullPath, isDirectory = isDir, size = 0, permissions = "")
+            }
     }
 
     suspend fun deleteFile(path: String): String {

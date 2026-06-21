@@ -42,7 +42,48 @@ class FileViewModel @Inject constructor(
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
-    private val pathHistory = mutableListOf("/sdcard")
+    private val pathHistory = mutableListOf<String>()
+    private var initialized = false
+
+    /**
+     * Initialize file browsing - try /sdcard first, fall back to /storage/emulated/0 or /
+     */
+    fun initialize(deviceId: String) {
+        if (initialized) return
+        initialized = true
+        viewModelScope.launch {
+            _isLoading.value = true
+            try {
+                // Try /sdcard first
+                var files = deviceManager.readDir(deviceId, "/sdcard")
+                var startPath = "/sdcard"
+
+                // If empty, try /storage/emulated/0
+                if (files.isEmpty()) {
+                    files = deviceManager.readDir(deviceId, "/storage/emulated/0")
+                    if (files.isNotEmpty()) startPath = "/storage/emulated/0"
+                }
+
+                // If still empty, try /
+                if (files.isEmpty()) {
+                    files = deviceManager.readDir(deviceId, "/")
+                    if (files.isNotEmpty()) startPath = "/"
+                }
+
+                _currentPath.value = startPath
+                pathHistory.clear()
+                pathHistory.add(startPath)
+                _files.value = files
+            } catch (_: Exception) {
+                _currentPath.value = "/"
+                pathHistory.clear()
+                pathHistory.add("/")
+                _files.value = emptyList()
+            } finally {
+                _isLoading.value = false
+            }
+        }
+    }
 
     fun navigateTo(deviceId: String, path: String) {
         viewModelScope.launch {
@@ -117,7 +158,7 @@ fun FilePanel(
     val isLoading by viewModel.isLoading.collectAsState()
 
     LaunchedEffect(deviceId) {
-        viewModel.navigateTo(deviceId, "/sdcard")
+        viewModel.initialize(deviceId)
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
