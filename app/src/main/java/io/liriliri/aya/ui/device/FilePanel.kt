@@ -43,6 +43,9 @@ class FileViewModel @Inject constructor(
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    private val _installResult = MutableStateFlow<String?>(null)
+    val installResult: StateFlow<String?> = _installResult.asStateFlow()
+
     private val pathHistory = mutableListOf<String>()
     private var initialized = false
 
@@ -159,11 +162,21 @@ class FileViewModel @Inject constructor(
 
     fun installApk(deviceId: String, apkPath: String) {
         viewModelScope.launch {
+            _installResult.value = "正在安装 ${apkPath.substringAfterLast("/")}..."
             try {
-                deviceManager.installPackage(deviceId, apkPath)
-            } catch (_: Exception) {}
+                val result = deviceManager.installPackage(deviceId, apkPath)
+                _installResult.value = if (result.contains("Success", ignoreCase = true)) {
+                    "✅ 安装成功: ${apkPath.substringAfterLast("/")}"
+                } else {
+                    "❌ 安装失败: $result"
+                }
+            } catch (e: Exception) {
+                _installResult.value = "❌ 安装出错: ${e.message}"
+            }
         }
     }
+
+    fun clearInstallResult() { _installResult.value = null }
 }
 
 @Composable
@@ -174,6 +187,7 @@ fun FilePanel(
     val files by viewModel.files.collectAsState()
     val currentPath by viewModel.currentPath.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+    val installResult by viewModel.installResult.collectAsState()
 
     LaunchedEffect(deviceId) {
         viewModel.initialize(deviceId)
@@ -207,6 +221,30 @@ fun FilePanel(
 
         if (isLoading) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
+
+        // Install result feedback
+        installResult?.let { result ->
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (result.contains("✅")) MaterialTheme.colorScheme.primaryContainer
+                    else if (result.contains("❌")) MaterialTheme.colorScheme.errorContainer
+                    else MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(result, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    IconButton(onClick = { viewModel.clearInstallResult() }, modifier = Modifier.size(24.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭", modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
         }
 
         // File list with pull-to-refresh

@@ -314,7 +314,28 @@ class DeviceManager(
     suspend fun installPackage(deviceId: String, apkPath: String): String {
         if (isLocal(deviceId)) return localDeviceManager.installPackage(apkPath)
         val conn = getConnection(deviceId)
-        return conn.shell("pm install -r '$apkPath'")
+        Log.d(TAG, "Installing APK: $apkPath")
+
+        // Method 1: Direct install
+        var result = conn.shell("pm install -r -t '$apkPath' 2>&1")
+        Log.d(TAG, "Direct install result: $result")
+        if (result.contains("Success", ignoreCase = true)) return result
+
+        // Method 2: Copy to /data/local/tmp then install (for scoped storage restrictions)
+        Log.d(TAG, "Trying /data/local/tmp approach...")
+        val tmpPath = "/data/local/tmp/_aya_install.apk"
+        conn.shell("cp '$apkPath' '$tmpPath' 2>&1")
+        result = conn.shell("pm install -r -t '$tmpPath' 2>&1")
+        Log.d(TAG, "Tmp install result: $result")
+        conn.shell("rm -f '$tmpPath'")
+        if (result.contains("Success", ignoreCase = true)) return result
+
+        // Method 3: Streaming install via cat pipe
+        Log.d(TAG, "Trying streaming install...")
+        result = conn.shell("cat '$apkPath' | pm install -S \$(stat -c '%s' '$apkPath' 2>/dev/null || echo 0) -r -t 2>&1")
+        Log.d(TAG, "Streaming install result: $result")
+
+        return result
     }
 
     suspend fun uninstallPackage(deviceId: String, packageName: String): String {
