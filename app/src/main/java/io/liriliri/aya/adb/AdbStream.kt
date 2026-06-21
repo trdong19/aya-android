@@ -2,7 +2,7 @@ package io.liriliri.aya.adb
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.consumeAsFlow
 import java.io.ByteArrayOutputStream
 
@@ -17,7 +17,7 @@ class AdbStream(
     // Use Channel instead of SharedFlow to prevent readLoop from blocking on backpressure.
     // Channel never suspends the sender (trySend) and buffers data for the receiver.
     private val _channel = Channel<ByteArray>(Channel.UNLIMITED)
-    val output: SharedFlow<ByteArray> = _channel.consumeAsFlow()
+    val output: Flow<ByteArray> = _channel.consumeAsFlow()
 
     private val ready = CompletableDeferred<Unit>()
     @Volatile var isOpen = true; private set
