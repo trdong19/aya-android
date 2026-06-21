@@ -46,6 +46,17 @@ class DeviceManager(
     /**
      * Connect to a device via WiFi ADB.
      */
+    /**
+     * Pair with a device using ADB pairing protocol (Android 11+).
+     * After pairing, future connections won't need authorization.
+     */
+    suspend fun pair(host: String, port: Int, code: String): String {
+        Log.d(TAG, "Starting pairing with $host:$port")
+        val wirelessPort = AdbPairing.pair(host, port, code, crypto)
+        Log.d(TAG, "Pairing done, wireless port: $wirelessPort")
+        return "配对成功！无线调试端口: $wirelessPort"
+    }
+
     suspend fun connect(host: String, port: Int = 5555): Device {
         val deviceId = "$host:$port"
         _connectionState.value = ConnectionState.Connecting
