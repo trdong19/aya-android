@@ -378,12 +378,22 @@ fun DeviceConnectScreen(
                         strokeWidth = 2.dp
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("连接中...")
+                    Text("连接中...", fontSize = 16.sp)
                 } else {
                     Icon(Icons.Default.Link, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("连接远程设备", fontSize = 16.sp)
                 }
+            }
+
+            // Hint when connecting
+            if (isConnecting) {
+                Text(
+                    "请在远程设备上点击「允许」授权 ADB 调试",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
             }
 
             Spacer(modifier = Modifier.height(12.dp))

@@ -51,9 +51,9 @@ class DeviceManager(
         _connectionState.value = ConnectionState.Connecting
 
         try {
-            // Try connecting with retries - device may need time for user to approve RSA key
+            // Try connecting with retries - device needs time for user to approve RSA key
             var connection: AdbConnection? = null
-            val maxAttempts = 3
+            val maxAttempts = 5
             for (attempt in 1..maxAttempts) {
                 try {
                     Log.d(TAG, "Connection attempt $attempt/$maxAttempts to $host:$port")
@@ -64,8 +64,7 @@ class DeviceManager(
                 } catch (e: Exception) {
                     Log.w(TAG, "Attempt $attempt failed: ${e.message}")
                     if (attempt < maxAttempts) {
-                        // Wait for user to approve the RSA key on the remote device
-                        delay(5000)
+                        delay(3000)
                     } else {
                         throw e
                     }
