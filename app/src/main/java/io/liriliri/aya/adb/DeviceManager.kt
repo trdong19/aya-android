@@ -78,31 +78,22 @@ class DeviceManager(
             // Persist our ADB key on the remote device so future connections don't need re-auth
             try {
                 val keyB64 = crypto.getPublicKeyBase64()
-                val keyLine = "$keyB64 aya@android"
-                Log.d(TAG, "Persisting ADB key on remote device (keyLen=${keyB64.length})...")
+                val keyData = "$keyB64 aya@android\n"
+                Log.d(TAG, "Persisting ADB key (keyLen=${keyB64.length})...")
 
-                // Try with su (Magisk/root) first - most reliable
-                var persisted = false
-                try {
-                    // Use printf to avoid shell escaping issues with base64
-                    conn.shell("su -c 'grep -qF aya@android /data/misc/adb/adb_keys 2>/dev/null || printf \"%s aya@android\\n\" \"$keyB64\" >> /data/misc/adb/adb_keys'")
-                    persisted = true
-                    Log.d(TAG, "Key persisted via su")
-                } catch (e: Exception) {
-                    Log.w(TAG, "su key inject failed: ${e.message}")
+                // Check if key already exists
+                val existing = conn.shell("su -c 'grep -c aya@android /data/misc/adb/adb_keys 2>/dev/null || echo 0'")
+                if (existing.trim() == "0") {
+                    // Write key via stream to avoid shell escaping issues with base64
+                    val stream = conn.open("shell:su -c 'tee -a /data/misc/adb/adb_keys > /dev/null'")
+                    stream.write(keyData.toByteArray())
+                    stream.close()
+                    // Read any output
+                    try { stream.output.collect { } } catch (_: Exception) {}
+                    Log.d(TAG, "ADB key written via su+tee")
+                } else {
+                    Log.d(TAG, "ADB key already exists on device")
                 }
-
-                // Fallback: try as shell user (unlikely to work on Android 11+)
-                if (!persisted) {
-                    try {
-                        conn.shell("grep -qF aya@android /data/misc/adb/adb_keys 2>/dev/null || printf \"%s aya@android\\n\" \"$keyB64\" >> /data/misc/adb/adb_keys")
-                        persisted = true
-                        Log.d(TAG, "Key persisted via shell")
-                    } catch (_: Exception) {}
-                }
-
-                if (persisted) Log.d(TAG, "ADB key persisted successfully")
-                else Log.w(TAG, "Could not persist ADB key")
             } catch (e: Exception) {
                 Log.w(TAG, "Key persistence failed (non-fatal): ${e.message}")
             }
