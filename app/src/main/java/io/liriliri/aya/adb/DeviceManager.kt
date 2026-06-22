@@ -81,17 +81,69 @@ class DeviceManager(
                 val keyData = "$keyB64 aya@android\n"
                 Log.d(TAG, "Persisting ADB key (keyLen=${keyB64.length})...")
 
-                // Check if key already exists (grep -q: exit 0=found, exit 1=not found)
-                val hasKey = conn.shell("su -c 'grep -q aya@android /data/misc/adb/adb_keys 2>/dev/null && echo YES || echo NO'")
-                Log.d(TAG, "Key check result: '${hasKey.trim()}'")
-                if (hasKey.trim() == "NO") {
-                    // Write key via stream to avoid shell escaping issues with base64
-                    val stream = conn.open("shell:su -c 'tee -a /data/misc/adb/adb_keys > /dev/null'")
-                    stream.write(keyData.toByteArray())
-                    stream.close()
-                    // Read any output
-                    try { stream.output.collect { } } catch (_: Exception) {}
-                    Log.d(TAG, "ADB key written via su+tee")
+                // Check if key already exists
+                val checkResult = conn.shell("grep -q aya@android /data/misc/adb/adb_keys 2>/dev/null && echo YES || echo NO")
+                Log.d(TAG, "Key check result: '${checkResult.trim()}'")
+                if (checkResult.trim() == "NO") {
+                    var written = false
+
+                    // Method 1: su + tee via stdin (for rooted devices)
+                    if (!written) {
+                        try {
+                            val suCheck = conn.shell("su -c id 2>/dev/null || echo NO_SU")
+                            if (!suCheck.contains("NO_SU") && suCheck.contains("uid=0")) {
+                                val stream = conn.open("shell:su -c 'tee -a /data/misc/adb/adb_keys > /dev/null'")
+                                stream.write(keyData.toByteArray())
+                                stream.close()
+                                try { stream.output.collect { } } catch (_: Exception) {}
+                                written = true
+                                Log.d(TAG, "ADB key written via su+tee")
+                            }
+                        } catch (e: Exception) {
+                            Log.d(TAG, "su method failed: ${e.message}")
+                        }
+                    }
+
+                    // Method 2: Shizuku (for non-rooted devices with Shizuku)
+                    if (!written) {
+                        try {
+                            if (io.liriliri.aya.util.ShizukuHelper.isShizukuAvailable()) {
+                                val escapedKey = keyData.replace("'", "'\\''")
+                                val cmd = "echo '${escapedKey}' >> /data/misc/adb/adb_keys"
+                                val exitCode = io.liriliri.aya.util.ShizukuHelper.exec(cmd)
+                                if (exitCode == 0) {
+                                    written = true
+                                    Log.d(TAG, "ADB key written via Shizuku")
+                                } else {
+                                    Log.w(TAG, "Shizuku write returned exit code: $exitCode")
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.d(TAG, "Shizuku method failed: ${e.message}")
+                        }
+                    }
+
+                    // Method 3: Direct write via ADB stream (may work if adbd has sufficient permissions)
+                    if (!written) {
+                        try {
+                            val stream = conn.open("shell:tee -a /data/misc/adb/adb_keys > /dev/null")
+                            stream.write(keyData.toByteArray())
+                            stream.close()
+                            try { stream.output.collect { } } catch (_: Exception) {}
+                            // Verify
+                            val verify = conn.shell("grep -q aya@android /data/misc/adb/adb_keys 2>/dev/null && echo YES || echo NO")
+                            if (verify.trim() == "YES") {
+                                written = true
+                                Log.d(TAG, "ADB key written via direct ADB stream")
+                            }
+                        } catch (e: Exception) {
+                            Log.d(TAG, "Direct ADB stream method failed: ${e.message}")
+                        }
+                    }
+
+                    if (!written) {
+                        Log.w(TAG, "WARNING: Could not persist ADB key - device approval will be needed each time")
+                    }
                 } else {
                     Log.d(TAG, "ADB key already exists on device")
                 }
