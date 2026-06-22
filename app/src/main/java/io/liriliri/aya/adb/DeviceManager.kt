@@ -81,9 +81,10 @@ class DeviceManager(
                 val keyData = "$keyB64 aya@android\n"
                 Log.d(TAG, "Persisting ADB key (keyLen=${keyB64.length})...")
 
-                // Check if key already exists
-                val existing = conn.shell("su -c 'grep -c aya@android /data/misc/adb/adb_keys 2>/dev/null || echo 0'")
-                if (existing.trim() == "0") {
+                // Check if key already exists (grep -q: exit 0=found, exit 1=not found)
+                val hasKey = conn.shell("su -c 'grep -q aya@android /data/misc/adb/adb_keys 2>/dev/null && echo YES || echo NO'")
+                Log.d(TAG, "Key check result: '${hasKey.trim()}'")
+                if (hasKey.trim() == "NO") {
                     // Write key via stream to avoid shell escaping issues with base64
                     val stream = conn.open("shell:su -c 'tee -a /data/misc/adb/adb_keys > /dev/null'")
                     stream.write(keyData.toByteArray())
