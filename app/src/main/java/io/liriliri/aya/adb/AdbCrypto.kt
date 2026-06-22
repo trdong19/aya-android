@@ -13,7 +13,8 @@ class AdbCrypto(private val keyPair: KeyPair) {
     fun getAdbPublicKeyPayload(): ByteArray {
         val publicKey = keyPair.public as java.security.interfaces.RSAPublicKey
         val blob = androidPublicKeyBlob(publicKey)
-        val identity = "host::".toByteArray() + byteArrayOf(0)
+        // Identity stored in adb_keys: base64-of-blob aya-android
+        val identity = "aya-android".toByteArray() + byteArrayOf(0)
         return blob + identity
     }
 

@@ -78,11 +78,11 @@ class DeviceManager(
             // Persist our ADB key on the remote device so future connections don't need re-auth
             try {
                 val keyB64 = crypto.getPublicKeyBase64()
-                val keyData = "$keyB64 aya@android\n"
+                val keyData = "$keyB64 aya-android\n"
                 Log.d(TAG, "Persisting ADB key (keyLen=${keyB64.length})...")
 
-                // Check if key already exists
-                val checkResult = conn.shell("grep -q aya@android /data/misc/adb/adb_keys 2>/dev/null && echo YES || echo NO")
+                // Check if key already exists (identity "aya-android" matches AUTH payload and CNXN)
+                val checkResult = conn.shell("grep -q aya-android /data/misc/adb/adb_keys 2>/dev/null && echo YES || echo NO")
                 Log.d(TAG, "Key check result: '${checkResult.trim()}'")
                 if (checkResult.trim() == "NO") {
                     var written = false

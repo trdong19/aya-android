@@ -25,8 +25,8 @@ object AdbProtocol {
     const val ADB_VERSION = 0x01000001
     const val MAX_DATA = 1024 * 1024  // 1MB
 
-    // System identity string
-    const val SYSTEM_IDENTITY_STRING = "device::"
+    // System identity string (host-side, matches AOSP adb client format: host::<identity>)
+    const val SYSTEM_IDENTITY_STRING = "host::aya-android"
 
     /**
      * ADB message header size: 6 fields × 4 bytes = 24 bytes

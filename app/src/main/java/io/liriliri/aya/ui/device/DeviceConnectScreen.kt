@@ -391,7 +391,7 @@ fun DeviceConnectScreen(
             // Hint when connecting
             if (isConnecting) {
                 Text(
-                    "请在远程设备上点击「允许」授权 ADB 调试",
+                    "请在远程设备上点击「始终允许」授权 ADB 调试",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(top = 4.dp)
